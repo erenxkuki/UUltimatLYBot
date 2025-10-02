@@ -8,6 +8,10 @@
 
 • Download [ffmpeg for Windows,Linux,MacOs](https://ffmpeg.org/download.html)
 
+• Also You Can Download [ffmpeg built For Android](https://github.com/Khang-NT/ffmpeg-binary-android/releases)
+
+• You Must Add ffmpeg to path (system,pydroid...) to use the bot
+
 • Run Install-requirements.bat to intall package to run bot
 
 • Run Start.bat or main.py to run bot
