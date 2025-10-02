@@ -1,5 +1,8 @@
+aiohttp
 discord.py
 pytz
+yt-dlp
 colorama
+python-dotenv
 art
 flask
