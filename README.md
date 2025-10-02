@@ -6,6 +6,8 @@
 
 • Download [Python](https://python.org)
 
+• Download [ffmpeg for Windows,Linux,MacOs](https://ffmpeg.org/download.html)
+
 • Run Install-requirements.bat to intall package to run bot
 
 • Run Start.bat or main.py to run bot
