@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
 # Token For Bot
 
-BotToken = "Your Bot Token Here"
+BotToken = os.getenv("DISCORD_BOT_TOKEN")
 
 # Config Path For ffmpeg
 FFMPEG_PATH = "/data/data/ru.iiec.pydroid3/files/ffmpeg/ffmpeg"
