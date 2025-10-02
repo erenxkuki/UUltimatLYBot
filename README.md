@@ -1,6 +1,6 @@
 # About
 
-• Lonely Bot Is Free And Open Source Spamming & Nukking And Casino Bot On Discord.
+• Lonely Bot Is Free And Open Source Spamming & Nukking,Casino And Music Bot On Discord.
 
 # How To Download
 
