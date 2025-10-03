@@ -7054,8 +7054,8 @@ if __name__ == "__main__":
         
         try:
             print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
-            app.run(host="0.0.0.0", port=5000, debug=True)
             bot.run(token)
+            app.run(host="0.0.0.0", port=5000, debug=True)
             break  # nếu chạy thành công thì thoát loop
         except Exception as e:
             print(Fore.RED + f"[Error] Lỗi khi khởi động bot: {e}" + Style.RESET_ALL)
