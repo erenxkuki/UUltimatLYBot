@@ -36,18 +36,19 @@ from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
 
-app = Flask(__name__)  # để mặc định, Flask sẽ tìm trong ./templates/
+app = Flask(__name__)  # Flask mặc định sẽ tìm ./templates/
 
 @app.route("/")
-def home():
+def home_alts():
     return render_template("index.html")
 
 @app.route("/premium")
-def premium():
+def premium_alts():
     return render_template("premium.html")
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+@app.route("/tutorial")
+def tutorial_alts():
+    return render_template("tutorial.html")
     
 # Config Path For ffmpeg
 FFMPEG_PATH = "/usr/bin/ffmpeg"
@@ -7049,6 +7050,7 @@ if __name__ == "__main__":
         
         try:
             print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
+            app.run(host="0.0.0.0", port=5000, debug=True)
             bot.run(token)
             break  # nếu chạy thành công thì thoát loop
         except Exception as e:
