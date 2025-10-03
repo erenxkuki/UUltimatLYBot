@@ -36,14 +36,7 @@ from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
 
-# Đường dẫn thư mục hiện tại
-BASE_DIR_ALTS = os.path.dirname(os.path.abspath(__file__))
-
-app = Flask(
-    __name__,
-    template_folder=BASE_DIR_ALTS,   # HTML cùng cấp main.py
-    static_folder=BASE_DIR_ALTS      # css, fonts, images cùng cấp
-)
+app = Flask(__name__)  # để mặc định, Flask sẽ tìm trong ./templates/
 
 @app.route("/")
 def home():
@@ -52,11 +45,6 @@ def home():
 @app.route("/premium")
 def premium():
     return render_template("premium.html")
-
-# Route để phục vụ file tĩnh (css, fonts, images)
-@app.route("/<path:filename>")
-def custom_static(filename):
-    return send_from_directory(BASE_DIR_ALTS, filename)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
