@@ -7,3 +7,6 @@ python-dotenv
 art
 flask
 pyNaCl
+yt_dlp
+youtube_dl
+youtube-dl
