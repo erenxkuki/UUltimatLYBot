@@ -24,6 +24,7 @@ from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 import aiohttp
+from flask import Flask, render_template, send_from_directory
 import discord
 import pytz
 import yt_dlp as youtube_dl
@@ -34,32 +35,28 @@ from dotenv import load_dotenv
 from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
-from flask import Flask, render_template, send_from_directory
-import subprocess
-import os
 
-# Lấy thư mục hiện tại
-BASE_DIRALTS = os.path.dirname(os.path.abspath(__file__))
+# Đường dẫn thư mục hiện tại
+BASE_DIR_ALTS = os.path.dirname(os.path.abspath(__file__))
 
-# Flask app: templates = thư mục hiện tại, static = chính folder hiện tại
 app = Flask(
     __name__,
-    template_folder=BASE_DIRALTS,
-    static_folder=BASE_DIRALTS
+    template_folder=BASE_DIR_ALTS,   # HTML cùng cấp main.py
+    static_folder=BASE_DIR_ALTS      # css, fonts, images cùng cấp
 )
 
-@app.route('/')
+@app.route("/")
 def home():
     return render_template("index.html")
 
-@app.route('/premium')
+@app.route("/premium")
 def premium():
     return render_template("premium.html")
 
-# Route để phục vụ CSS, fonts, images (nằm ngay trong folder gốc)
-@app.route('/<path:filename>')
+# Route để phục vụ file tĩnh (css, fonts, images)
+@app.route("/<path:filename>")
 def custom_static(filename):
-    return send_from_directory(BASE_DIRALTS, filename)
+    return send_from_directory(BASE_DIR_ALTS, filename)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
