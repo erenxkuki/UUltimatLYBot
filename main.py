@@ -7055,8 +7055,7 @@ if __name__ == "__main__":
         try:
             print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
             bot.run(token)
-            port = int(os.environ.get("PORT", 5050))  # lấy port Render cấp, fallback = 5050 khi chạy local
-            app.run(host="0.0.0.0", port=port)
+            app.run(host="0.0.0.0", port=10000, debug=True)
             break  # nếu chạy thành công thì thoát loop
         except Exception as e:
             print(Fore.RED + f"[Error] Lỗi khi khởi động bot: {e}" + Style.RESET_ALL)
