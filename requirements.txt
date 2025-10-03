@@ -6,3 +6,4 @@ colorama
 python-dotenv
 art
 flask
+pyNaCl
