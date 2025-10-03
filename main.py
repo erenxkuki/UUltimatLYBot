@@ -36,6 +36,10 @@ from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
 
+# Bot Token
+BotToken = os.getenv("DISCORD_BOT_TOKEN")
+
+# make bot alive
 app = Flask(__name__)  # Flask mặc định sẽ tìm ./templates/
 
 @app.route("/")
