@@ -20,6 +20,7 @@ import random
 import re
 import subprocess
 import uuid
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -7042,6 +7043,9 @@ async def on_message(message):
     # Tiếp tục xử lý các lệnh khác
     await bot.process_commands(message)
 
+def run_flask():
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port)
 
 # Chạy bot (THÊM TOKEN CỦA BẠN VÀO ĐÂY)
 if __name__ == "__main__":
@@ -7054,8 +7058,8 @@ if __name__ == "__main__":
         
         try:
             print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
+            threading.Thread(target=run_flask).start()
             bot.run(token)
-            app.run(host="0.0.0.0", port=10000, debug=True)
             break  # nếu chạy thành công thì thoát loop
         except Exception as e:
             print(Fore.RED + f"[Error] Lỗi khi khởi động bot: {e}" + Style.RESET_ALL)
