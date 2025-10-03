@@ -34,26 +34,42 @@ from dotenv import load_dotenv
 from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
-from flask import Flask, render_template
+from flask import Flask, render_template, send_from_directory
+import subprocess
+import os
 
-# Keep Bot Alive
+# Kiểm tra vị trí ffmpeg
+result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
+print("FFmpeg path:", result.stdout.strip())
 
-app = Flask(__name__)
+# Lấy thư mục hiện tại
+BASE_DIRALTS = os.path.dirname(os.path.abspath(__file__))
+
+# Flask app: templates = thư mục hiện tại, static = chính folder hiện tại
+app = Flask(
+    __name__,
+    template_folder=BASE_DIRALTS,
+    static_folder=BASE_DIRALTS
+)
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
+
+@app.route('/premium')
+def premium():
+    return render_template("premium.html")
+
+# Route để phục vụ CSS, fonts, images (nằm ngay trong folder gốc)
+@app.route('/<path:filename>')
+def custom_static(filename):
+    return send_from_directory(BASE_DIRALTS, filename)
 
 if __name__ == "__main__":
-    # debug=True để tự reload khi sửa code
-    app.run(host='0.0.0.0', port=5000, debug=True)
-
-# Token For Bot
-
-BotToken = os.getenv("DISCORD_BOT_TOKEN")
-
+    app.run(host="0.0.0.0", port=5000, debug=True)
+    
 # Config Path For ffmpeg
-FFMPEG_PATH = "/data/data/ru.iiec.pydroid3/files/ffmpeg/ffmpeg"
+FFMPEG_PATH = "/usr/bin/ffmpeg"
 
 try:
     result = subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, text=True)
