@@ -1,8 +1,13 @@
-<!DOCTYPE html><html lang="en"><head>
+<!DOCTYPE html>
+<html lang="en">
+<head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tutorial - Lonely Bot</title>
-  <link rel="stylesheet" href="css/all.min.css">
+
+  <!-- CSS từ static -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/all.min.css') }}">
+
   <style>
     body {
       margin: 0;
@@ -41,6 +46,13 @@
       color: #ccc;
       line-height: 1.6rem;
     }
+    a {
+      color: #caa6ff;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
   </style>
 </head>
 <body>
@@ -51,14 +63,11 @@
   <div class="content">
     <p>
       Tutorial how to use the bots. If it's not loading, click the link manually:
-      <a href="https://youtu.be/lA-myX2oVtg?si=wKvHUI5STniDHT-i" target="_blank" rel="noopener noreferrer">CLICK HERE</a>
-
-    
+      <a href="https://youtu.be/lA-myX2oVtg" target="_blank" rel="noopener noreferrer">CLICK HERE</a>
     </p>
 
     <!-- YouTube Video Embed -->
-    <iframe src="https://youtu.be/lA-myX2oVtg?si=wKvHUI5STniDHT-i" allowfullscreen=""></iframe>
+    <iframe src="https://www.youtube.com/embed/lA-myX2oVtg" allowfullscreen></iframe>
   </div>
-
-
-</body></html>
+</body>
+</html>

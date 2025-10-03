@@ -1,8 +1,13 @@
-<!DOCTYPE html><html lang="en"><head>
+<!DOCTYPE html>
+<html lang="en">
+<head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Premium - Lonely Bot</title>
-  <link rel="stylesheet" href="css/all.min.css">
+
+  <!-- CSS từ static -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/all.min.css') }}">
+
   <style>
     body {
       margin: 0;
@@ -119,7 +124,7 @@
 <body>
 
 <header>
-  <img src="images/insomnia.png" alt="Logo">
+  <img src="{{ url_for('static', filename='images/insomnia.png') }}" alt="Logo">
   <nav>
     <a href="/">Home</a>
     <a href="https://discord.gg/2anc7nHw6b" target="_blank">Discord</a>
@@ -131,7 +136,7 @@
 <section class="hero">
   <h1>Get Premium</h1>
   <p>Unlock exclusive features, commands, and priority support!</p>
-  <a class="btn" href="https://discord.com/users/1187618840251740163" target="_blank"><i class="fa-solid fa-credit-card"></i> Buy on Dms</a>
+  <a class="btn" href="https://discord.com/users/1187618840251740163" target="_blank"><i class="fa-solid fa-credit-card"></i> Buy on DMs</a>
   <a class="btn" href="https://discord.gg/2anc7nHw6b" target="_blank"><i class="fa-solid fa-ticket"></i> Get via Discord Ticket</a>
 </section>
 
@@ -143,14 +148,14 @@
       <li>Custom raids</li>
       <li>Custom nukes (premium = 1k+ pings)</li>
       <li>Priority support in Discord</li>
-      <li>Get 100-200 members everyday from raiding/nuking with ur link</li>
+      <li>Get 100-200 members everyday from raiding/nuking with your link</li>
     </ul>
   </div>
 
   <div class="feature-box">
     <h2>Pricing</h2>
     <p>Standard Premium: $2/lifetime</p>
-    <p>custom bot: $5/lifetime, includes hosting and updates.</p>
+    <p>Custom Bot: $5/lifetime, includes hosting and updates.</p>
   </div>
 </section>
 
@@ -158,6 +163,5 @@
   Copyright © 2025 - Lonely Bot
 </footer>
 
-
-
-</body></html>
+</body>
+</html>
