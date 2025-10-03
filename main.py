@@ -38,10 +38,6 @@ from flask import Flask, render_template, send_from_directory
 import subprocess
 import os
 
-# Kiểm tra vị trí ffmpeg
-result = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
-print("FFmpeg path:", result.stdout.strip())
-
 # Lấy thư mục hiện tại
 BASE_DIRALTS = os.path.dirname(os.path.abspath(__file__))
 
