@@ -5,7 +5,6 @@ art==6.5
 astroid==3.3.9
 async-timeout==3.0.1
 attrs==25.3.0
-audiostream==0.2
 autocommand==2.2.2
 backports.tarfile==1.2.0
 beautifulsoup4==4.11.1
