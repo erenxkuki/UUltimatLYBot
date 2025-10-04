@@ -52,7 +52,6 @@ mccabe==0.7.0
 more-itertools==10.3.0
 motor==3.6.0
 multidict==6.6.4
-ninja==1.12.1
 numpy==2.2.3
 opuslib==3.0.1
 packaging==25.0
