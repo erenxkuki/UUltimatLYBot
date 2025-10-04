@@ -69,6 +69,8 @@ pygame==2.6.1
 pygments==2.19.1
 pymongo==4.9.2
 pynacl==1.5.0
+PyPl
+audiop
 pyparsing==3.2.5
 pysdl2==0.9.17
 python-dotenv==1.1.1
