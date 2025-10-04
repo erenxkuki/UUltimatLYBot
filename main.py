@@ -38,6 +38,7 @@ init(autoreset=True)
 intents = discord.Intents.all()
 
 # Bot Token
+load_dotenv()
 BotToken = os.getenv("DISCORD_BOT_TOKEN")
 
 # make bot alive
