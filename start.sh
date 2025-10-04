@@ -1,18 +1,25 @@
 #!/bin/bash
+set -e  # Dừng khi gặp lỗi
 
-# Cập nhật gói
-apt-get update -y
+# --- Phần Build (chỉ cần chạy 1 lần khi deploy) ---
+if [ ! -d ".venv" ]; then
+    echo "[INFO] Cài đặt virtualenv và dependencies..."
+    
+    # Cập nhật gói và cài ffmpeg (chỉ cài 1 lần)
+    apt-get update -y
+    apt-get install -y ffmpeg
+    
+    # Tạo virtualenv
+    python3 -m venv .venv
+fi
 
-# Cài ffmpeg
-apt-get install -y ffmpeg
-
-# Thiết lập virtualenv (nếu muốn)
-python3 -m venv .venv
+# --- Kích hoạt virtualenv ---
 source .venv/bin/activate
 
-# Cài requirements
+# Cập nhật pip và cài requirements
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Chạy bot
+# --- Chạy bot ---
+echo "[INFO] Khởi chạy bot..."
 python main.py
