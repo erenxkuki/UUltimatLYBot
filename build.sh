@@ -12,6 +12,3 @@ source .venv/bin/activate
 # --- CÀI THÊM REQUIREMENTS ---
 pip install --upgrade pip
 pip install -r requirements.txt
-
-# --- CHẠY BOT ---
-python main.py
