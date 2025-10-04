@@ -28,7 +28,7 @@ import aiohttp
 from flask import Flask, render_template, send_from_directory
 import discord
 import pytz
-import yt_dlp as youtube_dl
+import yt_dlp
 from colorama import Fore, Style, init
 from discord import FFmpegPCMAudio, app_commands
 from discord.ext import commands, tasks
