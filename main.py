@@ -20,15 +20,13 @@ import random
 import re
 import subprocess
 import uuid
-import threading
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 import aiohttp
-from flask import Flask, render_template, send_from_directory
 import discord
 import pytz
-import yt_dlp
+import yt_dlp as youtube_dl
 from colorama import Fore, Style, init
 from discord import FFmpegPCMAudio, app_commands
 from discord.ext import commands, tasks
@@ -37,27 +35,13 @@ from help_pages import build_help_pages, HelpView
 init(autoreset=True)
 intents = discord.Intents.all()
 
-# Bot Token
+# Token For Bot
+
 load_dotenv()
 BotToken = os.getenv("DISCORD_BOT_TOKEN")
 
-# make bot alive
-app = Flask(__name__)  # Flask mặc định sẽ tìm ./templates/
-
-@app.route("/")
-def home_alts():
-    return render_template("index.html")
-
-@app.route("/premium")
-def premium_alts():
-    return render_template("premium.html")
-
-@app.route("/tutorial")
-def tutorial_alts():
-    return render_template("tutorial.html")
-    
 # Config Path For ffmpeg
-FFMPEG_PATH = "/usr/bin/ffmpeg"
+FFMPEG_PATH = "/data/data/ru.iiec.pydroid3/files/ffmpeg/ffmpeg"
 
 try:
     result = subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, text=True)
@@ -3596,31 +3580,7 @@ async def addwhitelist(interaction: discord.Interaction, user_id: str, display_n
             color=discord.Color.red()
         )
         await interaction.response.send_message(embed=error_embed, ephemeral=True)
-        
-@bot.event
-async def on_message(message):
-    if message.author.bot or not message.guild: 
-        return await bot.process_commands(message)
-    
-    user_id = str(message.author.id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
-    current_data = levels.get(user_id, {"xp": 0, "level": 1})
-    xp = current_data["xp"] + random.randint(5, 15)
-    level = current_data["level"]
-    
-    if xp >= level * 100:
-        xp -= level * 100
-        level += 1
-        embed = discord.Embed(
-            title="🎉 Level Up!",
-            description=f"{message.author.mention} đã lên level {level}!",
-            color=discord.Color.gold()
-        )
-        await message.channel.send(embed=embed)
-    
-    levels[user_id] = {"xp": xp, "level": level}
-    save_json(LEVEL_FILE, levels)  # ĐÃ SỬA THỨ TỰ THAM SỐ
-    await bot.process_commands(message)
-    
+
 # ====== ECONOMY COMMANDS ======
 @bot.command()
 async def balance(ctx):
@@ -4048,7 +4008,9 @@ class ScriptDropdown(discord.ui.Select):
 
         super().__init__(
             placeholder="📜 Chọn script để xem...",
-            min_values=1, max_values=1,
+            custom_id="script_dropdown",
+            min_values=1,
+            max_values=1,
             options=options
         )
         self.script_data = script_data
@@ -7044,9 +7006,6 @@ async def on_message(message):
     # Tiếp tục xử lý các lệnh khác
     await bot.process_commands(message)
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5050))
-    app.run(host="0.0.0.0", port=port)
 
 # Chạy bot (THÊM TOKEN CỦA BẠN VÀO ĐÂY)
 if __name__ == "__main__":
@@ -7059,7 +7018,6 @@ if __name__ == "__main__":
         
         try:
             print(Fore.CYAN + "[Info] " + Fore.WHITE + "Đang khởi động bot..." + Style.RESET_ALL)
-            threading.Thread(target=run_flask).start()
             bot.run(token)
             break  # nếu chạy thành công thì thoát loop
         except Exception as e:
