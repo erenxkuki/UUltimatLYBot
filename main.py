@@ -67,12 +67,12 @@ def _extract(query, ydl_opts):
 colors = [Fore.RED, Fore.YELLOW, Fore.GREEN, Fore.CYAN, Fore.BLUE, Fore.MAGENTA]
 
 ascii_art = r"""
- _                          _          ____          _
-| |      ___   _ __    ___ | | _   _  | __ )   ___  | |_
-| |     / _ \ | '_ \  / _ \| || | | | |  _ \  / _ \ | __|
-| |___ | (_) || | | ||  __/| || |_| | | |_) || (_) || |_
-|_____| \___/ |_| |_| \___||_| \__, | |____/  \___/  \__|
-                               |___/
+ _   _ _   _ _ _ _           _ _      _          ____        _   
+| | | | | | | | |         | (_)    | |        | __ )  ___ | |_ 
+| | | | | | | | |_ ___  __| |_  ___ | | ___    |  _ \ / _ \| __|
+| | | | | | | | __/ _ \/ _` | |/ _ \| |/ _ \   | |_) | (_) | |_ 
+| |_| | |_| | | ||  __/ (_| | | (_) | |  __/  |____/ \___/ \__|
+ \___/ \___/|_| \__\___|\__,_|_|\___/|_|\___|
 """
 
 def print_chroma(text):
@@ -153,7 +153,7 @@ def save_banned_users():
         with open(BANNED_FILE, "w", encoding="utf-8") as f:
             json.dump({str(k): v for k, v in BANNED_USERS.items()}, f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"[ERROR] Không thể lưu {BANNED_FILE}: {e}")
+        print(f"[ERROR] Cannot save {BANNED_FILE}: {e}")
 
 def load_banned_users():
     global BANNED_USERS
@@ -171,7 +171,7 @@ def load_banned_users():
         BANNED_USERS = {}
         
 def load_json(file_path):
-    """Đọc dữ liệu từ file JSON một cách an toàn"""
+    """Read data from JSON files safely"""
     try:
         # Chuyển đổi path thành Path object nếu là string
         if isinstance(file_path, str):
@@ -227,14 +227,14 @@ def get_balance(user_id):
     return credits.get(user_id, 0)
 
 def add_balance(user_id, amount):
-    """Thêm coin cho user"""
+    """Add coins for users"""
     user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     credits[user_id] = get_balance(user_id) + amount
     save_json(DATA_FILE, credits)
     return credits[user_id]
 
 def remove_balance(user_id, amount):
-    """Trừ coin của user"""
+    """Minus user's coins"""
     user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if get_balance(user_id) >= amount:
         credits[user_id] -= amount
@@ -243,14 +243,14 @@ def remove_balance(user_id, amount):
     return None
 
 def set_balance(user_id, amount):
-    """Đặt số dư coin cho user"""
+    """Set coin balance for user"""
     user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     credits[user_id] = amount
     save_json(DATA_FILE, credits)
     return credits[user_id]
 
 def can_daily(user_id):
-    """Kiểm tra user có thể nhận daily không"""
+    """Check if the user can receive daily"""
     user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if user_id not in daily_data:
         return True
@@ -260,7 +260,7 @@ def can_daily(user_id):
     return (now - last_daily).days >= 1
 
 def can_work(user_id):
-    """Kiểm tra user có thể work không"""
+    """Check if the user can work"""
     user_id = str(user_id)  # ĐẢM BẢO CHUYỂN THÀNH STRING
     if user_id not in work_data:
         return True, 0
@@ -304,7 +304,7 @@ def set_box(user_id: int, amount: int):
     
 def simple_embed(title: str, description: str, color: discord.Color = discord.Color.blue()):
     """
-    Hàm tạo embed đơn giản để dùng lại nhiều lần
+    The embed constructor is simple to reuse over and over again
     """
     embed = discord.Embed(
         title=title,
